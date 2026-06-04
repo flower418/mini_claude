@@ -75,6 +75,10 @@ def run_bash(command: str) -> str:
 
 
 # ── Agent loop ─────────────────────────────────────────
+# 初始阶段，用户输入一句 prompt
+# 然后进入循环，llm 根据这句话，判断是否要调用工具
+# 如果调用工具，就会把工具调用的结果重新输入 history，喂给 llm 进行下一步决策
+# 如果没有，则把对话内容返回给用户
 def agent_loop(messages: list):
     while True:
         response = client.messages.create(
@@ -115,7 +119,7 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        # 打印模型最终的文本回复
+        # 获取 llm 的回复
         last = history[-1]["content"]
         if isinstance(last, list):
             for block in last:
