@@ -45,16 +45,21 @@ MODEL = CONFIG["MODEL_ID"]
 SYSTEM = f"You are a coding agent at {os.getcwd()}. Use bash to solve tasks. Act, don't explain."
 
 # ── Tool definitions ───────────────────────────────────
-TOOLS = [{
-    "name": "bash",
-    "description": "Run a shell command.",
-    "input_schema": {
-        "type": "object",
-        "properties": {"command": {"type": "string"}},
-        "required": ["command"],
-    },
-}]
-
+# 模型经过训练，在他认为需要调用工具时，就会阅读 TOOLS 里的 description，然后生成 schema 规范的 block
+# 我们在处理时，就会根据他的 block.type，选择调用合适的工具
+# 模型的能力是训练得来的，但是模型使用工具的能力需要我们为他建设
+TOOLS = [
+    {"name": "bash", "description": "Run a shell command.",
+     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
+    {"name": "read_file", "description": "Read file contents.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
+    {"name": "write_file", "description": "Write content to a file.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
+    {"name": "edit_file", "description": "Replace exact text in a file once.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
+    {"name": "glob", "description": "Find files matching a glob pattern.",
+     "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
+]
 
 # ── Tool implementation ────────────────────────────────
 def run_bash(command: str) -> str:
@@ -73,6 +78,57 @@ def run_bash(command: str) -> str:
     except (FileNotFoundError, OSError) as e:
         return f"Error: {e}"
 
+def safe_path(p: str) -> Path:
+    path = (REPO_DIR / p).resolve()
+    if not path.is_relative_to(REPO_DIR):
+        raise ValueError(f"Path escapes workspace: {p}")
+    return path
+
+def run_read(path:str, limit: int | None = None) -> str:
+    try:
+        lines = safe_path(path).read_text().splitlines()
+        if limit and limit < len(lines):
+            lines = lines[:limit] + [f"... ({len(lines) - limit}) more lines"]
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+    
+def run_write(path: str, content: str) -> str:
+    try:
+        file_path = safe_path(path)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content)
+        return f"Wrote {len(content)} bytes to {path}"
+    except Exception as e:
+        return f"Error: {e}"
+
+def run_edit(path: str, old_text: str, new_text: str) -> str:
+    try:
+        file_path = safe_path(path)
+        text = file_path.read_text()
+        if old_text not in text:
+            return f"Error: text not found in {path}"
+        file_path.write_text(text.replace(old_text, new_text, 1))
+        return f"Edited {path}"
+    except Exception as e:
+        return f"Error: {e}"
+
+# 进行文件的通配
+def run_glob(pattern: str) -> str:
+    import glob as g
+    try:
+        results = []
+        for match in g.glob(pattern, root_dir=REPO_DIR):
+            if (REPO_DIR / match).resolve().is_relative_to(REPO_DIR):
+                results.append(match)
+        return "\n".join(results) if results else "(no matches)"
+    except Exception as e:
+        return f"Error: {e}"
+    
+TOOL_HANDLERS = {
+    "bash": run_bash, "read_file": run_read, "write_file": run_write,
+    "edit_file": run_edit, "glob": run_glob,
+}
 
 # ── Agent loop ─────────────────────────────────────────
 # 初始阶段，用户输入一句 prompt
@@ -93,9 +149,10 @@ def agent_loop(messages: list):
         results = []
         for block in response.content:
             if block.type == "tool_use":
-                print(f"\033[33m$ {block.input['command']}\033[0m")
-                output = run_bash(block.input["command"])
-                print(output[:200])
+                print(f"\033[33m$ {block.name}\033[0m")
+                handler = TOOL_HANDLERS[block.name]
+                output = handler(**block.input) if handler else f"Unknown {block.name}"
+                print(str(output)[:200])
                 results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
