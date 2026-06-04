@@ -1,5 +1,8 @@
 __pycache__/
 *.py[codz]
 .env
+.env.*
+!.env.example
 .venv
 venv/
+.DS_Store
