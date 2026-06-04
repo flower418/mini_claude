@@ -6,15 +6,18 @@ A small Claude-style coding agent loop built with the Anthropic Messages API.
 
 ```sh
 pip install -r requirements.txt
-cp .env.example .env
 ```
 
-Fill in `.env` with:
+Create a local `.env` file in the project root:
 
-```sh
-ANTHROPIC_API_KEY=...
-MODEL_ID=...
+```env
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+MODEL_ID=claude-sonnet-4-6
+# Optional:
+# ANTHROPIC_BASE_URL=https://api.anthropic.com
 ```
+
+Do not commit `.env`; it is ignored by Git.
 
 Then run:
 

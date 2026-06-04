@@ -22,7 +22,7 @@ ENV_FILE = REPO_DIR / ".env"
 
 def load_repo_config() -> dict[str, str]:
     if not ENV_FILE.exists():
-        raise RuntimeError(f"Missing {ENV_FILE}. Copy .env.example to .env and fill it in.")
+        raise RuntimeError(f"Missing {ENV_FILE}. Create it in the repo root; see README.md.")
 
     config = {k: v for k, v in dotenv_values(ENV_FILE).items() if v}
     missing = [key for key in ("ANTHROPIC_API_KEY", "MODEL_ID") if not config.get(key)]
