@@ -130,6 +130,56 @@ TOOL_HANDLERS = {
     "edit_file": run_edit, "glob": run_glob,
 }
 
+# 用三道机制来保证运行的安全
+# 1.极端危险程序，直接拒绝
+# 2.有风险的程序：如果满足一定规则，如写在 workspace 外或者删除某些文件，需要用户审核
+# 如果不满足这些条件，就直接通过，运行
+# 如果满足风险，则进入第三个审核
+# 3.用户审核：审核步骤 2 放过来的命令，判断是否通过
+# 4.如果 3 重审核都没筛出去，那就直接运行
+DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"]
+
+def check_deny_list(command: str) -> str | None:
+    for pattern in DENY_LIST:
+        if pattern in command:
+            return f"Blocked: '{pattern}' is on the deny list"
+    return None
+
+PERMISSION_RULES = [
+    {"tools": ["write_file", "edit_file"],
+     "check": lambda args: not (REPO_DIR / args.get("path", "")).resolve().is_relative_to(REPO_DIR),
+     "message": "Writing outside workspace"},
+    {"tools": ["bash"],
+     "check": lambda args: any(kw in args.get("command", "") for kw in ["rm ", "> /etc/", "chmod 777"]),
+     "message": "Potentially destructive command"},
+]
+
+def check_rules(tool_name: str, args: dict) -> str | None:
+    for rule in PERMISSION_RULES:
+        if tool_name in rule["tools"] and rule["check"](args):
+            return rule["message"]
+    return None
+
+def ask_user(tool_name: str, args: dict, reason: str) -> str:
+    print(f"\n\033[33m⚠  {reason}\033[0m")
+    print(f"   Tool: {tool_name}({args})")
+    choice = input("   Allow? [y/N] ").strip().lower()
+    return "allow" if choice in ("y", "yes") else "deny"
+
+# Pipeline: all three gates chained
+def check_permission(block) -> bool:
+    if block.name == "bash":
+        reason = check_deny_list(block.input.get("command", ""))
+        if reason:
+            print(f"\n\033[31m⛔ {reason}\033[0m")
+            return False
+    reason = check_rules(block.name, block.input)
+    if reason:
+        decision = ask_user(block.name, block.input, reason)
+        if decision == "deny":
+            return False
+    return True
+
 # ── Agent loop ─────────────────────────────────────────
 # 初始阶段，用户输入一句 prompt
 # 然后进入循环，llm 根据这句话，判断是否要调用工具
@@ -150,6 +200,12 @@ def agent_loop(messages: list):
         for block in response.content:
             if block.type == "tool_use":
                 print(f"\033[33m$ {block.name}\033[0m")
+
+                if not check_permission(block):
+                    results.append({"type": "tool_result", "tool_use_id": block.id,
+                                   "content": "Permission denied"})
+                    continue
+
                 handler = TOOL_HANDLERS[block.name]
                 output = handler(**block.input) if handler else f"Unknown {block.name}"
                 print(str(output)[:200])
