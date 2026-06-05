@@ -80,6 +80,35 @@ def search_memory(query: str) -> str:
     return "\n\n---\n\n".join(results)
 
 
+# ── Write ───────────────────────────────────────────────
+
+def write_memory(mem_type: str, content: str) -> str:
+    """Write content to a memory file. Called via memory_write tool."""
+    mem_type = mem_type.lower().strip()
+    if mem_type not in MEMORY_TYPES:
+        return f"Invalid memory type: {mem_type}. Valid types: {', '.join(MEMORY_TYPES)}"
+    content = content.strip()
+    if not content:
+        return "No content provided."
+    if len(content) < 10:
+        return "Content too short to be meaningful."
+
+    path = MEMORY_DIR / f"{mem_type}.md"
+    existing = path.read_text() if path.exists() else ""
+
+    # dedup
+    new_lines = [l.strip() for l in content.split("\n") if l.strip()]
+    existing_lower = existing.lower()
+    overlap = sum(1 for line in new_lines if line.lower()[:60] in existing_lower)
+    if new_lines and overlap / len(new_lines) > 0.6:
+        return f"Content already exists in {mem_type}.md (skipped)"
+
+    path.write_text(existing.rstrip() + f"\n\n{content}\n")
+    _rebuild_index()
+    print(f"\033[90m[memory] Wrote to {mem_type}.md\033[0m")
+    return f"Saved to .memory/{mem_type}.md"
+
+
 # ── Consolidation ───────────────────────────────────────
 
 def consolidate_memory(conversation_snippet: str):

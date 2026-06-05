@@ -9,7 +9,7 @@ from config import REPO_DIR, DENY_LIST, safe_path, MODEL, client, extract_text
 from skills import SUB_SYSTEM, load_skill
 from hooks import trigger_hooks
 from compact import run_compact
-from memory import search_memory
+from memory import search_memory, write_memory
 
 CURRENT_TODOS: list[dict] = []
 rounds_since_todo = 0
@@ -107,6 +107,9 @@ TOOLS = [
          {"focus": {"type": "string"}}, []),
     TOOL("memory_search", "Search user memory for preferences, feedback, project context, and learned facts. Call this BEFORE responding to any user request.",
          {"query": {"type": "string"}}),
+    TOOL("memory_write", "Save important information to memory. Use this when the user explicitly states a preference, feedback, or project fact worth remembering.",
+         {"mem_type": {"type": "string", "enum": ["user", "feedback", "project", "reference"]},
+          "content": {"type": "string"}}),
 ]
 
 SUB_TOOLS = [
@@ -259,6 +262,7 @@ TOOL_HANDLERS = {
     "edit_file": run_edit, "glob": run_glob, "todo_write": run_todo_write,
     "task": spawn_subagent, "load_skill": load_skill,
     "compact": run_compact, "memory_search": search_memory,
+    "memory_write": write_memory,
 }
 
 SUB_HANDLERS = {

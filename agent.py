@@ -114,7 +114,7 @@ def agent_loop(messages: list):
 
                 if block.name == "todo_write":
                     tools.rounds_since_todo = 0
-                if block.name == "memory_search":
+                if block.name == "memory_search" or block.name == "memory_write":
                     tools.rounds_since_memory = 0
 
         messages.append({"role": "user", "content": results})
