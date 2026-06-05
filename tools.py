@@ -9,6 +9,7 @@ from config import REPO_DIR, DENY_LIST, safe_path, MODEL, client, extract_text
 from skills import SUB_SYSTEM, load_skill
 from hooks import trigger_hooks
 from compact import run_compact
+from memory import search_memory
 
 CURRENT_TODOS: list[dict] = []
 rounds_since_todo = 0
@@ -103,6 +104,8 @@ TOOLS = [
          {"name": {"type": "string"}}),
     TOOL("compact", "Summarize earlier conversation to free context space.",
          {"focus": {"type": "string"}}, []),
+    TOOL("memory_search", "Search memory files (.memory/) for relevant context, preferences, and learned facts.",
+         {"query": {"type": "string"}}),
 ]
 
 SUB_TOOLS = [
@@ -254,7 +257,7 @@ TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob, "todo_write": run_todo_write,
     "task": spawn_subagent, "load_skill": load_skill,
-    "compact": run_compact,
+    "compact": run_compact, "memory_search": search_memory,
 }
 
 SUB_HANDLERS = {

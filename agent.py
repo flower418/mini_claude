@@ -10,6 +10,10 @@ try:
 except ImportError:
     pass
 
+import memory
+
+memory.init_memory()
+
 from config import MODEL, client, extract_text
 from skills import SYSTEM
 import tools
@@ -129,3 +133,7 @@ if __name__ == "__main__":
                 if getattr(block, "type", None) == "text":
                     print(block.text)
         print()
+
+        # ── Memory consolidation after each turn ─────────
+        snippet = json.dumps(history[-6:], default=str, ensure_ascii=False)
+        memory.consolidate_memory(snippet)

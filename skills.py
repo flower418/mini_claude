@@ -56,12 +56,18 @@ SUB_SYSTEM = (
 
 
 def build_system() -> str:
-    """Build SYSTEM prompt with skill catalog injected at startup."""
+    """Build SYSTEM prompt with skill catalog and memory index."""
+    from memory import get_memory_index
+
     catalog = list_skills()
+    memory_index = get_memory_index()
     return (
-        f"You are a coding agent at {REPO_DIR}. "
-        f"Skills available:\n{catalog}\n"
-        "Use load_skill to get full details when needed."
+        f"You are a coding agent at {REPO_DIR}.\n\n"
+        f"## Skills\n{catalog}\n"
+        f"Use load_skill to get full details when needed.\n\n"
+        f"## Memory\n{memory_index}\n"
+        f"Use memory_search to query memory. "
+        f"Before starting a task, check if relevant memories exist."
     )
 
 
