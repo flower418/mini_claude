@@ -7,6 +7,8 @@ from pathlib import Path
 import subprocess
 import json
 
+import yaml
+
 try:
     import readline
     readline.parse_and_bind("set bind-tty-special-chars off")
@@ -21,6 +23,7 @@ from dotenv import dotenv_values
 
 # ── Environment ────────────────────────────────────────
 REPO_DIR = Path(__file__).resolve().parent
+SKILLS_DIR = REPO_DIR / "skills"
 ENV_FILE = REPO_DIR / ".env"
 
 
@@ -46,11 +49,6 @@ client = Anthropic(
 MODEL = CONFIG["MODEL_ID"]
 
 # ── System prompt ──────────────────────────────────────
-SYSTEM = (
-    f"You are a coding agent at {REPO_DIR}. "
-    "For complex sub-problems, use the task tool to spawn a subagent."
-) 
-
 SUB_SYSTEM = (
     f"You are a coding agent at {REPO_DIR}. "
     "Complete the task you were given, then return a concise summary. "
@@ -118,7 +116,9 @@ TOOLS = [
     {"name": "todo_write", "description": "Create and manage a task list for your current coding session.",
      "input_schema": {"type": "object", "properties": {"todos": {"type": "array", "items": {"type": "object", "properties": {"content": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["content", "status"]}}}, "required": ["todos"]}},
     {"name": "task","description": "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
-     "input_schema": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]},}
+     "input_schema": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]},},
+    {"name": "load_skill", "description": "Load the full content of a skill by name.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
 ]
 
 # subagent 没有 subagent 功能
@@ -134,6 +134,66 @@ SUB_TOOLS = [
     {"name": "glob", "description": "Find files matching a glob pattern.",
      "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
 ]
+
+# 对 skill 的开头进行解析
+def _parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Parse YAML frontmatter from SKILL.md. Returns (meta, body)."""
+    if not text.startswith("---"):
+        return {}, text
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}, text
+    try:
+        meta = yaml.safe_load(parts[1]) or {}
+    except yaml.YAMLError:
+        meta = {}
+    return meta, parts[2].strip()
+
+SKILL_REGISTRY: dict[str, dict] = {}
+
+def _scan_skills():
+    """Scan skills/ dir, populate SKILL_REGISTRY with name/description/content."""
+    if not SKILLS_DIR.exists():
+        return
+    for d in sorted(SKILLS_DIR.iterdir()):
+        if not d.is_dir():
+            continue
+        manifest = d / "SKILL.md"
+        if manifest.exists():
+            raw = manifest.read_text()
+            meta, body = _parse_frontmatter(raw)
+            name = meta.get("name", d.name)
+            desc = meta.get("description", raw.split("\n")[0].lstrip("#").strip())
+            SKILL_REGISTRY[name] = {"name": name, "description": desc, "content": raw}
+
+_scan_skills()
+
+def list_skills() -> str:
+    """List all skills (name + one-line description)."""
+    if not SKILL_REGISTRY:
+        return "(no skills found)"
+    return "\n".join(f"- **{s['name']}**: {s['description']}" for s in SKILL_REGISTRY.values())
+
+# skill 架构氛围两个层次
+# 1.system prompt 层次，将所有 skill 列给 llm，但不展示具体内容，只供查询参考
+# 2.on-demand 层次，llm 根据需要具体调用查询相关的 skill
+def build_system() -> str:
+    """Build SYSTEM prompt with skill catalog injected at startup."""
+    catalog = list_skills()
+    return (
+        f"You are a coding agent at {REPO_DIR}. "
+        f"Skills available:\n{catalog}\n"
+        "Use load_skill to get full details when needed."
+    )
+
+SYSTEM = build_system()
+
+def load_skill(name: str) -> str:
+    """Load full skill content. Lookup via registry — no path traversal."""
+    skill = SKILL_REGISTRY.get(name)
+    if not skill:
+        return f"Skill not found: {name}"
+    return skill["content"]
 
 # ── Tool implementation ────────────────────────────────
 def run_bash(command: str) -> str:
@@ -277,7 +337,7 @@ def safe_dispatch(handler, inputs: dict) -> str:
 TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob, "todo_write": run_todo_write,
-    "task": spawn_subagent
+    "task": spawn_subagent, "load_skill": load_skill
 }
 
 SUB_HANDLERS = {
