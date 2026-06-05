@@ -84,25 +84,34 @@ def search_memory(query: str) -> str:
 
 def consolidate_memory(conversation_snippet: str):
     """After a conversation turn, extract new knowledge into memory."""
-    if len(conversation_snippet.strip()) < 200:
+    stripped = conversation_snippet.strip()
+    if len(stripped) < 500:
+        return
+
+    # count exchanges: need meaningful back-and-forth to extract anything
+    exchange_count = stripped.count('"role": "user"')
+    if exchange_count < 2:
         return
 
     prompt = (
-        "Analyze this conversation snippet and extract any NEW information worth remembering. "
-        "Categorize into:\n"
-        "- user: preferences, coding style, personal context about the user\n"
-        "- feedback: user corrections, satisfaction, explicit feedback on agent's work\n"
-        "- project: project facts, conventions, architecture decisions, file layout\n"
-        "- reference: facts, URLs, technical details learned during the conversation\n\n"
-        "RULES:\n"
-        "1. Only extract NEW information, not obvious or already-known facts\n"
-        "2. Be concise — one or two sentences per item\n"
-        "3. Format EXACTLY as:\n"
+        "Analyze this conversation. Extract ONLY information that was EXPLICITLY STATED "
+        "by the user and is worth remembering long-term. Categorize into:\n"
+        "- user: preferences, coding style, personal context — ONLY if the user SAID it\n"
+        "- feedback: user corrections or explicit satisfaction — ONLY if the user SAID it\n"
+        "- project: project facts, conventions, architecture — ONLY if discussed explicitly\n"
+        "- reference: URLs, facts, technical details — ONLY from the conversation\n\n"
+        "CRITICAL RULES:\n"
+        "1. NEVER infer, guess, or deduce. Only extract what was STATED VERBATIM.\n"
+        "2. Do NOT extract from tool commands (e.g. 'create test.py' says nothing about coding style).\n"
+        "3. Do NOT extract usernames, paths, or environment details.\n"
+        "4. A single trivial tool call (write_file, bash, etc.) contains NO memory-worthy information.\n"
+        "5. If there is nothing explicitly stated by the user worth remembering, output NO_NEW_INFO.\n"
+        "6. When in doubt, output NO_NEW_INFO.\n\n"
+        "Format (only if you have real, explicit information):\n"
         "---TYPE: <category>---\n"
-        "<markdown bullet points>\n"
+        "<markdown bullet points — each must be traceable to a user statement>\n"
         "---END---\n\n"
-        "4. If there is genuinely nothing new, output only: NO_NEW_INFO\n\n"
-        f"CONVERSATION:\n{conversation_snippet[-6000:]}"
+        f"CONVERSATION:\n{stripped[-6000:]}"
     )
 
     try:
@@ -137,15 +146,19 @@ def _parse_and_save(text: str):
         if mem_type not in MEMORY_TYPES:
             continue
         content = content.strip()
-        if not content:
+        if not content or len(content) < 20:
             continue
 
         path = MEMORY_DIR / f"{mem_type}.md"
         existing = path.read_text() if path.exists() else ""
 
-        # simple dedup: skip if first sentence already present
-        first_sentence = content.split("\n")[0].strip()[:120]
-        if first_sentence and first_sentence in existing:
+        # dedup: skip if substantial content overlap (>60% of lines already present)
+        new_lines = [l.strip() for l in content.split("\n") if l.strip() and not l.startswith("#")]
+        if not new_lines:
+            continue
+        existing_lower = existing.lower()
+        overlap = sum(1 for line in new_lines if line.lower()[:60] in existing_lower)
+        if overlap / len(new_lines) > 0.6:
             continue
 
         path.write_text(existing.rstrip() + f"\n\n{content}\n")
@@ -154,7 +167,6 @@ def _parse_and_save(text: str):
 
     if updated:
         _rebuild_index()
-        # check if any file needs pruning
         for name in MEMORY_TYPES:
             path = MEMORY_DIR / f"{name}.md"
             if path.exists() and len(path.read_text()) > MEMORY_PRUNE_THRESHOLD:
