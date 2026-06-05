@@ -83,35 +83,27 @@ def search_memory(query: str) -> str:
 # ── Consolidation ───────────────────────────────────────
 
 def consolidate_memory(conversation_snippet: str):
-    """After a conversation turn, extract new knowledge into memory."""
-    stripped = conversation_snippet.strip()
-    if len(stripped) < 500:
-        return
-
-    # count exchanges: need meaningful back-and-forth to extract anything
-    exchange_count = stripped.count('"role": "user"')
-    if exchange_count < 2:
-        return
-
+    """After a conversation turn, ask LLM to judge and extract new knowledge."""
     prompt = (
-        "Analyze this conversation. Extract ONLY information that was EXPLICITLY STATED "
-        "by the user and is worth remembering long-term. Categorize into:\n"
-        "- user: preferences, coding style, personal context — ONLY if the user SAID it\n"
-        "- feedback: user corrections or explicit satisfaction — ONLY if the user SAID it\n"
-        "- project: project facts, conventions, architecture — ONLY if discussed explicitly\n"
-        "- reference: URLs, facts, technical details — ONLY from the conversation\n\n"
-        "CRITICAL RULES:\n"
-        "1. NEVER infer, guess, or deduce. Only extract what was STATED VERBATIM.\n"
-        "2. Do NOT extract from tool commands (e.g. 'create test.py' says nothing about coding style).\n"
-        "3. Do NOT extract usernames, paths, or environment details.\n"
-        "4. A single trivial tool call (write_file, bash, etc.) contains NO memory-worthy information.\n"
-        "5. If there is nothing explicitly stated by the user worth remembering, output NO_NEW_INFO.\n"
-        "6. When in doubt, output NO_NEW_INFO.\n\n"
-        "Format (only if you have real, explicit information):\n"
+        "You are a memory gatekeeper. Analyze this conversation and decide:\n"
+        "1. Is there any NEW, explicitly-stated information worth remembering long-term?\n"
+        "2. If NO, output exactly: NO_NEW_INFO\n"
+        "3. If YES, extract into categories:\n"
+        "   - user: preferences, coding style, personal context — ONLY if user SAID it\n"
+        "   - feedback: user corrections, satisfaction — ONLY if user SAID it\n"
+        "   - project: project facts, conventions, architecture — ONLY if discussed\n"
+        "   - reference: URLs, facts, technical details — ONLY from conversation\n\n"
+        "RULES:\n"
+        "- NEVER infer, guess, or deduce. Only what was STATED VERBATIM.\n"
+        "- Tool commands (write_file, bash, etc.) contain NO memory-worthy info.\n"
+        "- Usernames, file paths, environment details are NOT memory-worthy.\n"
+        "- A brief tool call + 'Done' exchange is NEVER worth remembering.\n"
+        "- When in doubt, output NO_NEW_INFO. Be conservative.\n\n"
+        "Output format (only if extracting):\n"
         "---TYPE: <category>---\n"
-        "<markdown bullet points — each must be traceable to a user statement>\n"
+        "<markdown bullet points>\n"
         "---END---\n\n"
-        f"CONVERSATION:\n{stripped[-6000:]}"
+        f"CONVERSATION:\n{conversation_snippet[-8000:]}"
     )
 
     try:
