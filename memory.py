@@ -1,11 +1,14 @@
 # ── Memory system ──────────────────────────────────────
-import json
+# Storage: .memory/<entry-name>/entry.md (YAML frontmatter + body)
+# Index:   .memory/MEMORY.md (auto-generated catalog)
 import re
+import yaml
 
 from config import MEMORY_DIR, MEMORY_PRUNE_THRESHOLD, client, MODEL
 
 MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
-MEMORY_TYPES = {
+MEMORY_TYPES = ["user", "feedback", "project", "reference"]
+TYPE_DESCRIPTIONS = {
     "user":      "User preferences, coding style, and personal context",
     "feedback":  "User feedback on the agent's work and corrections",
     "project":   "Project-specific knowledge, conventions, and architecture",
@@ -16,35 +19,90 @@ MEMORY_TYPES = {
 # ── Init ────────────────────────────────────────────────
 
 def init_memory():
-    """Create .memory directory and default files if they don't exist."""
+    """Create .memory directory and index if they don't exist."""
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    for name, desc in MEMORY_TYPES.items():
-        path = MEMORY_DIR / f"{name}.md"
-        if not path.exists():
-            path.write_text(f"# {name}\n\n{desc}\n")
-    _rebuild_index()
+    if not MEMORY_INDEX.exists():
+        _rebuild_index()
+
+
+# ── Entry helpers ───────────────────────────────────────
+
+def _read_entry(name: str) -> dict | None:
+    """Read an entry's frontmatter + body. Returns None if not found."""
+    path = MEMORY_DIR / name / "entry.md"
+    if not path.exists():
+        # legacy: try flat file
+        for t in MEMORY_TYPES:
+            flat = MEMORY_DIR / f"{t}.md"
+            if flat.exists() and name == t:
+                meta = {"name": t, "type": t, "description": TYPE_DESCRIPTIONS[t]}
+                meta["body"] = flat.read_text()
+                return meta
+        return None
+    raw = path.read_text()
+    return _parse_frontmatter(raw)
+
+
+def _parse_frontmatter(text: str) -> dict | None:
+    """Parse YAML frontmatter from entry.md. Returns {name, type, description, body}."""
+    if not text.startswith("---"):
+        return None
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return None
+    try:
+        meta = yaml.safe_load(parts[1]) or {}
+    except yaml.YAMLError:
+        return None
+    meta["body"] = parts[2].strip()
+    return meta
+
+
+def _list_entries() -> list[dict]:
+    """List all memory entries with their frontmatter."""
+    entries = []
+    if not MEMORY_DIR.exists():
+        return entries
+    for d in sorted(MEMORY_DIR.iterdir()):
+        if not d.is_dir():
+            continue
+        entry = _read_entry(d.name)
+        if entry:
+            entries.append(entry)
+    return entries
+
+
+def _slugify(text: str) -> str:
+    """Generate a safe directory name from text."""
+    slug = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", text.lower()).strip("-")
+    return slug[:60] or "entry"
 
 
 # ── Index ───────────────────────────────────────────────
 
 def _rebuild_index():
-    """Rebuild MEMORY.md from actual memory files."""
+    """Rebuild MEMORY.md from all entry directories."""
+    entries = _list_entries()
     lines = ["# Memory Index\n"]
-    for name, desc in MEMORY_TYPES.items():
-        path = MEMORY_DIR / f"{name}.md"
-        if not path.exists():
-            continue
-        content = path.read_text()
-        line_count = len([l for l in content.split("\n") if l.strip() and not l.startswith("#")])
-        size_hint = ""
-        if line_count <= 1:
-            size_hint = "(empty)"
-        elif line_count <= 5:
-            size_hint = f"({line_count} entries)"
-        else:
-            size_hint = f"({line_count} entries, {len(content)} chars)"
-        lines.append(f"- **{name}.md**: {desc} {size_hint}")
-    MEMORY_INDEX.write_text("\n".join(lines) + "\n")
+    if not entries:
+        for t in MEMORY_TYPES:
+            lines.append(f"\n## {t}\n({TYPE_DESCRIPTIONS[t]})\n")
+    else:
+        grouped = {t: [] for t in MEMORY_TYPES}
+        for e in entries:
+            t = e.get("type", "reference")
+            if t in grouped:
+                grouped[t].append(e)
+        for t in MEMORY_TYPES:
+            group = grouped[t]
+            lines.append(f"\n## {t}")
+            if not group:
+                lines.append(f"({TYPE_DESCRIPTIONS[t]} — empty)")
+            else:
+                for e in group:
+                    lines.append(f"- **{e['name']}**: {e.get('description', '')}")
+    lines.append("")
+    MEMORY_INDEX.write_text("\n".join(lines))
 
 
 def get_memory_index() -> str:
@@ -57,62 +115,77 @@ def get_memory_index() -> str:
 # ── Search ──────────────────────────────────────────────
 
 def search_memory(query: str) -> str:
-    """Search all memory files for relevant info. Called via memory_search tool."""
+    """Search all memory entries for relevant info. Called via memory_search tool."""
     if not query.strip():
         return "Please provide a search query."
     query_lower = query.lower()
+    keywords = [w for w in query_lower.split() if len(w) > 1]
+    entries = _list_entries()
     results = []
-    for name in MEMORY_TYPES:
-        path = MEMORY_DIR / f"{name}.md"
-        if not path.exists():
-            continue
-        content = path.read_text()
-        # keyword overlap scoring
-        keywords = [w for w in query_lower.split() if len(w) > 1]
-        if not keywords:
-            results.append(f"### {name}.md\n\n{content[:2000]}")
-            continue
-        score = sum(1 for kw in keywords if kw in content.lower())
+    for e in entries:
+        text = f"{e.get('name','')} {e.get('description','')} {e.get('body','')}".lower()
+        score = sum(1 for kw in keywords if kw in text) if keywords else 1
         if score > 0:
-            results.append(f"### {name}.md (relevance: {score})\n\n{content[:3000]}")
+            results.append((score, e))
     if not results:
         return f"No memory matched query: {query}"
-    return "\n\n---\n\n".join(results)
+    results.sort(key=lambda x: x[0], reverse=True)
+    out = []
+    for _, e in results:
+        body = e.get("body", "")[:3000]
+        out.append(
+            f"## {e['name']} (type: {e.get('type','?')})\n"
+            f"_{e.get('description', '')}_\n\n{body}"
+        )
+    return "\n\n---\n\n".join(out)
 
 
 # ── Write ───────────────────────────────────────────────
 
-def write_memory(mem_type: str, content: str) -> str:
-    """Write content to a memory file. Called via memory_write tool."""
+def write_memory(name: str, description: str, mem_type: str, content: str) -> str:
+    """Create or update a memory entry. Called via memory_write tool."""
     mem_type = mem_type.lower().strip()
     if mem_type not in MEMORY_TYPES:
-        return f"Invalid memory type: {mem_type}. Valid types: {', '.join(MEMORY_TYPES)}"
+        return f"Invalid type: {mem_type}. Valid: {', '.join(MEMORY_TYPES)}"
+    name = name.strip()
+    description = description.strip()
     content = content.strip()
-    if not content:
-        return "No content provided."
-    if len(content) < 10:
-        return "Content too short to be meaningful."
+    if not name or not content or len(content) < 10:
+        return "Name and content required (content ≥ 10 chars)."
+    if len(description) > 200:
+        description = description[:200] + "..."
 
-    path = MEMORY_DIR / f"{mem_type}.md"
-    existing = path.read_text() if path.exists() else ""
+    slug = _slugify(name)
+    entry_dir = MEMORY_DIR / slug
+    entry_dir.mkdir(parents=True, exist_ok=True)
 
-    # dedup
-    new_lines = [l.strip() for l in content.split("\n") if l.strip()]
-    existing_lower = existing.lower()
-    overlap = sum(1 for line in new_lines if line.lower()[:60] in existing_lower)
-    if new_lines and overlap / len(new_lines) > 0.6:
-        return f"Content already exists in {mem_type}.md (skipped)"
+    entry_md = (
+        f"---\n"
+        f"name: {name}\n"
+        f"description: {description}\n"
+        f"type: {mem_type}\n"
+        f"---\n\n"
+        f"{content}\n"
+    )
+    entry_file = entry_dir / "entry.md"
 
-    path.write_text(existing.rstrip() + f"\n\n{content}\n")
+    if entry_file.exists():
+        existing = entry_file.read_text()
+        new_lines = set(content.lower().split("\n"))
+        exist_lines = set(existing.lower().split("\n"))
+        if len(new_lines & exist_lines) / max(len(new_lines), 1) > 0.6:
+            return f"Content largely overlaps existing entry '{slug}' (skipped)"
+
+    entry_file.write_text(entry_md)
     _rebuild_index()
-    print(f"\033[90m[memory] Wrote to {mem_type}.md\033[0m")
-    return f"Saved to .memory/{mem_type}.md"
+    print(f"\033[90m[memory] Wrote entry: {slug}\033[0m")
+    return f"Saved to .memory/{slug}/entry.md (type: {mem_type})"
 
 
 # ── Consolidation ───────────────────────────────────────
 
 def consolidate_memory(conversation_snippet: str):
-    """After a conversation turn, ask LLM to judge and extract new knowledge."""
+    """After a conversation turn, ask LLM to judge and extract new entries."""
     prompt = (
         "You are a memory gatekeeper. Analyze this conversation and decide whether "
         "the USER explicitly stated anything worth remembering long-term.\n\n"
@@ -122,22 +195,19 @@ def consolidate_memory(conversation_snippet: str):
         "- project: facts about the codebase, conventions, architecture discussed\n"
         "- reference: URLs, technical facts mentioned in conversation\n\n"
         "CRITICAL — DO NOT EXTRACT:\n"
-        "- Anything from tool commands or tool outputs (write_file content, bash output, etc.)\n"
-        "- Code style inferred from files the agent created (the agent chooses style, not the user)\n"
+        "- Anything from tool commands or tool outputs\n"
+        "- Code style inferred from files the agent created\n"
         "- File paths, usernames, or environment details\n"
-        "- Vague statements like 'write a python program' with no specifics\n"
-        "- Information the agent generated (only what the USER said)\n\n"
-        "EXAMPLES of what to SKIP (output NO_NEW_INFO):\n"
-        "- User: 'create test.py' → Agent: writes file with tabs → SKIP (user didn't say anything about tabs)\n"
-        "- User: '写个程序' → Agent: asks clarifying question → SKIP (no preference stated)\n\n"
-        "EXAMPLES of what to KEEP:\n"
-        "- User: 'I prefer tabs, not spaces' → user: Prefers tabs for indentation\n"
-        "- User: '简单写写，我就做个小测试' → user: 偏好简单的小程序用于测试\n\n"
-        "Output NO_NEW_INFO if nothing matches the KEEP criteria. "
-        "Otherwise format as:\n"
-        "---TYPE: <category>---\n"
-        "<markdown bullet points>\n"
-        "---END---\n\n"
+        "- Vague requests with no specifics\n\n"
+        "FORMAT EACH ENTRY AS:\n"
+        "<<<ENTRY>>>\n"
+        "name: <slug-like-name>\n"
+        "description: <one-line summary>\n"
+        "type: <user|feedback|project|reference>\n"
+        "<<<BODY>>>\n"
+        "<markdown content with Why/How to apply if relevant>\n"
+        "<<<END>>>\n\n"
+        "If nothing worth remembering, output only: NO_NEW_INFO\n\n"
         f"CONVERSATION:\n{conversation_snippet[-8000:]}"
     )
 
@@ -145,7 +215,7 @@ def consolidate_memory(conversation_snippet: str):
         response = client.messages.create(
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=1500,
+            max_tokens=2000,
         )
         result = "\n".join(
             getattr(block, "text", "")
@@ -163,77 +233,103 @@ def consolidate_memory(conversation_snippet: str):
 
 
 def _parse_and_save(text: str):
-    """Parse LLM consolidation output and append to memory files."""
-    pattern = r"---TYPE:\s*(\w+)---\s*\n(.*?)\n---END---"
+    """Parse <<<ENTRY>>> blocks and create entry directories."""
+    pattern = r"<<<ENTRY>>>\s*\n(.*?)<<<BODY>>>\s*\n(.*?)\n<<<END>>>"
     matches = re.findall(pattern, text, re.DOTALL)
     updated = False
 
-    for mem_type, content in matches:
-        mem_type = mem_type.lower().strip()
+    for meta_str, body in matches:
+        meta = {}
+        for line in meta_str.strip().split("\n"):
+            line = line.strip()
+            if ":" in line:
+                k, v = line.split(":", 1)
+                meta[k.strip()] = v.strip()
+        name = meta.get("name", "")
+        description = meta.get("description", "")
+        mem_type = meta.get("type", "reference")
+        body = body.strip()
+
+        if not name or not body or len(body) < 20:
+            continue
         if mem_type not in MEMORY_TYPES:
             continue
-        content = content.strip()
-        if not content or len(content) < 20:
-            continue
 
-        path = MEMORY_DIR / f"{mem_type}.md"
-        existing = path.read_text() if path.exists() else ""
+        slug = _slugify(name)
+        entry_dir = MEMORY_DIR / slug
+        entry_dir.mkdir(parents=True, exist_ok=True)
+        entry_file = entry_dir / "entry.md"
 
-        # dedup: skip if substantial content overlap (>60% of lines already present)
-        new_lines = [l.strip() for l in content.split("\n") if l.strip() and not l.startswith("#")]
-        if not new_lines:
-            continue
-        existing_lower = existing.lower()
-        overlap = sum(1 for line in new_lines if line.lower()[:60] in existing_lower)
-        if overlap / len(new_lines) > 0.6:
-            continue
+        # dedup
+        if entry_file.exists():
+            existing = entry_file.read_text().lower()
+            if body.lower()[:120] in existing:
+                continue
 
-        path.write_text(existing.rstrip() + f"\n\n{content}\n")
-        print(f"\033[90m[memory] Updated {mem_type}.md\033[0m")
+        entry_md = (
+            f"---\n"
+            f"name: {name}\n"
+            f"description: {description}\n"
+            f"type: {mem_type}\n"
+            f"---\n\n"
+            f"{body}\n"
+        )
+        entry_file.write_text(entry_md)
+        print(f"\033[90m[memory] Created entry: {slug}\033[0m")
         updated = True
 
     if updated:
         _rebuild_index()
-        for name in MEMORY_TYPES:
-            path = MEMORY_DIR / f"{name}.md"
-            if path.exists() and len(path.read_text()) > MEMORY_PRUNE_THRESHOLD:
-                _prune_file(name)
+        # prune oversized entries
+        for entry in _list_entries():
+            if len(entry.get("body", "")) > MEMORY_PRUNE_THRESHOLD:
+                _prune_entry(entry["name"])
 
 
 # ── Pruning ─────────────────────────────────────────────
 
-def _prune_file(mem_type: str):
-    """Prune redundant content from a single memory file."""
-    path = MEMORY_DIR / f"{mem_type}.md"
-    content = path.read_text()
+def _prune_entry(name: str):
+    """Prune redundant content from a single memory entry."""
+    entry = _read_entry(name)
+    if not entry:
+        return
+    body = entry.get("body", "")
+    if len(body) <= MEMORY_PRUNE_THRESHOLD:
+        return
 
     prompt = (
-        f"Prune this memory file by consolidating redundant or duplicate information. "
-        f"Keep all unique, valuable facts. Merge similar items. Remove obsolete info. "
-        f"Output the cleaned version in the same markdown format.\n\n"
-        f"ORIGINAL ({mem_type}.md):\n{content}"
+        f"Prune this memory entry by removing redundant or duplicate information. "
+        f"Keep all unique, valuable facts. Merge similar points. Output only the cleaned body "
+        f"(no frontmatter).\n\n"
+        f"ENTRY: {name}\nDESCRIPTION: {entry.get('description','')}\n\n"
+        f"BODY:\n{body}"
     )
 
     try:
         response = client.messages.create(
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=4000,
+            max_tokens=2000,
         )
         pruned = "\n".join(
             getattr(block, "text", "")
             for block in response.content
             if getattr(block, "type", None) == "text"
         ).strip()
-    except Exception as e:
-        print(f"\033[90m[memory] Pruning skipped for {mem_type}.md (API error: {e})\033[0m")
+    except Exception:
         return
 
-    if pruned and len(pruned) < len(content) * 0.9:
-        path.write_text(pruned)
-        print(f"\033[90m[memory] Pruned {mem_type}.md ({len(content)} -> {len(pruned)} chars)\033[0m")
-    elif pruned:
-        path.write_text(pruned)
-        print(f"\033[90m[memory] Refreshed {mem_type}.md\033[0m")
-
-    _rebuild_index()
+    if pruned and len(pruned) < len(body) * 0.9:
+        slug = _slugify(name)
+        entry_file = MEMORY_DIR / slug / "entry.md"
+        new_md = (
+            f"---\n"
+            f"name: {entry['name']}\n"
+            f"description: {entry.get('description','')}\n"
+            f"type: {entry.get('type','reference')}\n"
+            f"---\n\n"
+            f"{pruned}\n"
+        )
+        entry_file.write_text(new_md)
+        print(f"\033[90m[memory] Pruned {name} ({len(body)} -> {len(pruned)} chars)\033[0m")
+        _rebuild_index()

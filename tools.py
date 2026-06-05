@@ -107,8 +107,10 @@ TOOLS = [
          {"focus": {"type": "string"}}, []),
     TOOL("memory_search", "Search user memory for preferences, feedback, project context, and learned facts. Call this BEFORE responding to any user request.",
          {"query": {"type": "string"}}),
-    TOOL("memory_write", "Save important information to memory. Use this when the user explicitly states a preference, feedback, or project fact worth remembering.",
-         {"mem_type": {"type": "string", "enum": ["user", "feedback", "project", "reference"]},
+    TOOL("memory_write", "Save important information to memory. Use when the user explicitly states a preference, feedback, or project fact.",
+         {"name": {"type": "string"},
+          "description": {"type": "string"},
+          "mem_type": {"type": "string", "enum": ["user", "feedback", "project", "reference"]},
           "content": {"type": "string"}}),
 ]
 
