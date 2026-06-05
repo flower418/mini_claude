@@ -130,6 +130,37 @@ TOOL_HANDLERS = {
     "edit_file": run_edit, "glob": run_glob,
 }
 
+# 为 agent 添加 hook
+# 他有一个定时出发机制，在我们的设计里，选择在四个时候触发
+# 1.对话进入 llm 前，触发一次
+# 2.进入 llm 后，调用工具前，触发一次
+# 3.调用工具后，退出前，触发一次
+# 4.退出后触发一次
+# 添加 hook 的目的是让我们不需要把所有额外添加的性能全写在循环里
+# 我们只需要在 loop 内部增加 hook，然后在 loop 外为每个阶段注册 hook
+# 这样每个阶段都能有自己应当执行的程序，同时保留了 loop 的完整功能
+HOOKS = {
+    "UserPromptSubmit": [],
+    "PreToolUse": [],
+    "PostToolUse": [],
+    "Stop": [],
+}
+
+# 把某个特定的事件注册进 hook
+# callback 指某个需要登记起来，某个阶段调用的函数
+def register_hook(event: str, callback):
+    HOOKS[event].append(callback)
+
+# trigger 指触发某个 event 上的所有 hook
+# *args 指可变参数，数量不限
+def trigger_hooks(event: str, *args):
+    for callback in HOOKS[event]:
+        result = callback(*args)
+        if result is not None:
+            return result
+    return None
+
+
 # 用三道机制来保证运行的安全
 # 1.极端危险程序，直接拒绝
 # 2.有风险的程序：如果满足一定规则，如写在 workspace 外或者删除某些文件，需要用户审核
@@ -138,47 +169,76 @@ TOOL_HANDLERS = {
 # 3.用户审核：审核步骤 2 放过来的命令，判断是否通过
 # 4.如果 3 重审核都没筛出去，那就直接运行
 DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"]
+DESTRUCTIVE = ["rm ", "> /etc/", "chmod 777"]
 
-def check_deny_list(command: str) -> str | None:
-    for pattern in DENY_LIST:
-        if pattern in command:
-            return f"Blocked: '{pattern}' is on the deny list"
-    return None
-
-PERMISSION_RULES = [
-    {"tools": ["write_file", "edit_file"],
-     "check": lambda args: not (REPO_DIR / args.get("path", "")).resolve().is_relative_to(REPO_DIR),
-     "message": "Writing outside workspace"},
-    {"tools": ["bash"],
-     "check": lambda args: any(kw in args.get("command", "") for kw in ["rm ", "> /etc/", "chmod 777"]),
-     "message": "Potentially destructive command"},
-]
-
-def check_rules(tool_name: str, args: dict) -> str | None:
-    for rule in PERMISSION_RULES:
-        if tool_name in rule["tools"] and rule["check"](args):
-            return rule["message"]
-    return None
-
-def ask_user(tool_name: str, args: dict, reason: str) -> str:
-    print(f"\n\033[33m⚠  {reason}\033[0m")
-    print(f"   Tool: {tool_name}({args})")
-    choice = input("   Allow? [y/N] ").strip().lower()
-    return "allow" if choice in ("y", "yes") else "deny"
-
-# Pipeline: all three gates chained
-def check_permission(block) -> bool:
+# 把 permission 判断改写成 hook 形式，这样就不用在 loop 中单独添加代码，避免冗余
+# 只有需要停止后续流程时才会返回内容
+# 否则默认返回 none，表示可以继续流程
+def permission_hook(block):
     if block.name == "bash":
-        reason = check_deny_list(block.input.get("command", ""))
-        if reason:
-            print(f"\n\033[31m⛔ {reason}\033[0m")
-            return False
-    reason = check_rules(block.name, block.input)
-    if reason:
-        decision = ask_user(block.name, block.input, reason)
-        if decision == "deny":
-            return False
-    return True
+        for pattern in DENY_LIST:
+            if pattern in block.input.get("command", ""):
+                print(f"\n\033[31m⛔ Blocked: '{pattern}'\033[0m")
+                return "Permission denied by deny list"
+
+        for kw in DESTRUCTIVE:
+            if kw in block.input.get("command", ""):
+                print(f"\n\033[33m⚠  Potentially destructive command\033[0m")
+                print(f"   Tool: {block.name}({block.input})")
+                choice = input("   Allow? [y/N] ").strip().lower()
+                if choice not in ("y", "yes"):
+                    return "Permission denied by user"
+                
+    if block.name in ("write_file", "edit_file"):
+        path = block.input.get("path", "")
+        if not (REPO_DIR / path).resolve().is_relative_to(REPO_DIR):
+            print(f"\n\033[33m⚠  Writing outside workspace\033[0m")
+            print(f"   Tool: {block.name}({block.input})")
+            choice = input("   Allow? [y/N] ").strip().lower()
+            if choice not in ("y", "yes"):
+                return "Permission denied by user"
+    
+    return None
+
+# 只返回 none，不拦截流程
+def log_hook(block):
+    """PreToolUse: log every tool call."""
+    args_preview = str(list(block.input.values())[:2])[:60]
+    print(f"\033[90m[HOOK] {block.name}({args_preview})\033[0m")
+    return None
+
+def large_output_hook(block, output):
+    """PostToolUse: warn on large output."""
+    if len(str(output)) > 100000:
+        print(f"\033[33m[HOOK] ⚠ Large output from {block.name}: {len(str(output))} chars\033[0m")
+    return None
+
+# UserPromptSubmit hook: log user input before it reaches the LLM
+def context_inject_hook(query: str):
+    print(f"\033[90m[HOOK] UserPromptSubmit: working in {REPO_DIR}\033[0m")
+    return None
+
+# stop hook
+# 统计调用了多少次 tool
+def summary_hook(messages: list):
+    tool_count = 0
+
+    for m in messages:
+        content = m.get("content")
+
+        if isinstance(content, list):
+            for b in content:
+                if (isinstance(b, dict)) and b.get("type") == "tool_result":
+                    tool_count += 1
+
+    print(f"\033[90m[HOOK] Stop: session used {tool_count} tool calls\033[0m")
+    return None
+
+register_hook("UserPromptSubmit", context_inject_hook)
+register_hook("PreToolUse", permission_hook)
+register_hook("PreToolUse", log_hook)
+register_hook("PostToolUse", large_output_hook)
+register_hook("Stop", summary_hook)
 
 # ── Agent loop ─────────────────────────────────────────
 # 初始阶段，用户输入一句 prompt
@@ -194,26 +254,32 @@ def agent_loop(messages: list):
 
         messages.append({"role": "assistant", "content": response.content})
         if response.stop_reason != "tool_use":
+            force = trigger_hooks("Stop", messages)
+
+            # 模型在 stop 前强制他再对话一轮，比如审查结果之类的
+            if force:
+                messages.append({"role": "user", "content": force})
+                continue
             return
 
         results = []
         for block in response.content:
             if block.type == "tool_use":
-                print(f"\033[33m$ {block.name}\033[0m")
-
-                if not check_permission(block):
+                blocked = trigger_hooks("PreToolUse", block)
+                # 检查 PreToolUse hook
+                # 如果有任务返回，直接给 llm 加一轮对话
+                # 如果没有返回，表示没有触发需要中断的 hook，直接执行下面的 loop
+                if blocked:
                     results.append({"type": "tool_result", "tool_use_id": block.id,
-                                   "content": "Permission denied"})
+                                    "content": str(blocked)})
                     continue
 
                 handler = TOOL_HANDLERS[block.name]
                 output = handler(**block.input) if handler else f"Unknown {block.name}"
-                print(str(output)[:200])
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": output,
-                })
+
+                trigger_hooks("PostToolUse", block, output)
+                results.append({"type": "tool_result", "tool_use_id": block.id,
+                                "content": output})
 
         messages.append({"role": "user", "content": results})
 
@@ -226,6 +292,7 @@ if __name__ == "__main__":
     while True:
         try:
             query = input("\033[36m>> \033[0m")
+            trigger_hooks("UserPromptSubmit", query)
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
