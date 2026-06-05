@@ -63,11 +63,12 @@ def build_system() -> str:
     memory_index = get_memory_index()
     return (
         f"You are a coding agent at {REPO_DIR}.\n\n"
+        f"## Memory (check first!)\n{memory_index}\n"
+        f"IMPORTANT: Before EVERY user request, call memory_search to check "
+        f"for relevant preferences, feedback, or project context. "
+        f"Do this even if memory seems empty — it may have been updated.\n\n"
         f"## Skills\n{catalog}\n"
-        f"Use load_skill to get full details when needed.\n\n"
-        f"## Memory\n{memory_index}\n"
-        f"Use memory_search to query memory. "
-        f"Before starting a task, check if relevant memories exist."
+        f"Use load_skill to get full details when needed."
     )
 
 

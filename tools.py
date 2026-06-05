@@ -13,6 +13,7 @@ from memory import search_memory
 
 CURRENT_TODOS: list[dict] = []
 rounds_since_todo = 0
+rounds_since_memory = 0
 
 
 def _normalize_todos(todos):
@@ -104,7 +105,7 @@ TOOLS = [
          {"name": {"type": "string"}}),
     TOOL("compact", "Summarize earlier conversation to free context space.",
          {"focus": {"type": "string"}}, []),
-    TOOL("memory_search", "Search memory files (.memory/) for relevant context, preferences, and learned facts.",
+    TOOL("memory_search", "Search user memory for preferences, feedback, project context, and learned facts. Call this BEFORE responding to any user request.",
          {"query": {"type": "string"}}),
 ]
 

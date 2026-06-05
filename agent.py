@@ -33,6 +33,14 @@ def agent_loop(messages: list):
                              "content": "<reminder>Update your todos.</reminder>"})
             tools.rounds_since_todo = 0
 
+        # ── Memory reminder ──────────────────────────────
+        if tools.rounds_since_memory >= 2 and messages:
+            index = memory.get_memory_index()
+            if "(empty)" not in index:
+                messages.append({"role": "user",
+                                 "content": f"<reminder>Check memory before proceeding:\n{index}\nUse memory_search if relevant.</reminder>"})
+                tools.rounds_since_memory = 0
+
         # ── Compact pipeline: preprocessing → LLM compact → API call ──
         messages[:] = preprocess_pipeline(messages)
 
@@ -86,6 +94,7 @@ def agent_loop(messages: list):
 
         # ── Normal tool dispatch ─────────────────────────
         tools.rounds_since_todo += 1
+        tools.rounds_since_memory += 1
         results = []
 
         for block in response.content:
@@ -105,6 +114,8 @@ def agent_loop(messages: list):
 
                 if block.name == "todo_write":
                     tools.rounds_since_todo = 0
+                if block.name == "memory_search":
+                    tools.rounds_since_memory = 0
 
         messages.append({"role": "user", "content": results})
 
@@ -125,6 +136,7 @@ if __name__ == "__main__":
 
         trigger_hooks("UserPromptSubmit", query)
         history.append({"role": "user", "content": query})
+        tools.rounds_since_memory = 0  # new query → encourage fresh memory check
         agent_loop(history)
 
         last = history[-1]["content"]
