@@ -1,7 +1,11 @@
 # ── Imports ────────────────────────────────────────────
+import ast
+import glob as glob_module
+import inspect
 import os
 from pathlib import Path
 import subprocess
+import json
 
 try:
     import readline
@@ -42,7 +46,59 @@ client = Anthropic(
 MODEL = CONFIG["MODEL_ID"]
 
 # ── System prompt ──────────────────────────────────────
-SYSTEM = f"You are a coding agent at {os.getcwd()}. Use bash to solve tasks. Act, don't explain."
+SYSTEM = (
+    f"You are a coding agent at {REPO_DIR}. "
+    "For complex sub-problems, use the task tool to spawn a subagent."
+) 
+
+SUB_SYSTEM = (
+    f"You are a coding agent at {REPO_DIR}. "
+    "Complete the task you were given, then return a concise summary. "
+    "Do not delegate further."
+)
+
+CURRENT_TODOS: list[dict] = []
+
+def _normalize_todos(todos):
+    # 进行兜底，如果 todos 传入字符串，尝试变成 list
+    if isinstance(todos, str):
+        try:
+            todos = json.loads(todos)
+        except json.JSONDecodeError:
+            try:
+                todos = ast.literal_eval(todos)
+            except (SyntaxError, ValueError):
+                return None, "Error: todos must be a list or JSON array string"
+
+    if not isinstance(todos, list):
+        return None, "Error: todos must be a list"
+
+    # todos: [didct]
+    for i, t in enumerate(todos):
+        if not isinstance(t, dict):
+            return None, f"Error: todos[{i}] must be an object"
+        if "content" not in t or "status" not in t:
+            return None, f"Error: todos[{i}] missing 'content' or 'status'"
+        if t["status"] not in ("pending", "in_progress", "completed"):
+            return None, f"Error: todos[{i}] has invalid status '{t['status']}'"
+    return todos, None
+
+# 把 todo 写入全局的 CURRENT_TODOS
+def run_todo_write(todos: list) -> str:
+    global CURRENT_TODOS
+
+    todos, error = _normalize_todos(todos)
+    if error:
+        return error
+
+    CURRENT_TODOS = todos
+    lines = ["\n\033[33m## Current Tasks\033[0m"]
+    for t in CURRENT_TODOS:
+        icon = {"pending": " ", "in_progress": "\033[36m▸\033[0m", "completed": "\033[32m✓\033[0m"}[t["status"]]
+        lines.append(f"  [{icon}] {t['content']}")
+    print("\n".join(lines))
+
+    return f"Updated {len(CURRENT_TODOS)} tasks"
 
 # ── Tool definitions ───────────────────────────────────
 # 模型经过训练，在他认为需要调用工具时，就会阅读 TOOLS 里的 description，然后生成 schema 规范的 block
@@ -52,7 +108,25 @@ TOOLS = [
     {"name": "bash", "description": "Run a shell command.",
      "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
     {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}}, "required": ["path"]}},
+    {"name": "write_file", "description": "Write content to a file.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
+    {"name": "edit_file", "description": "Replace exact text in a file once.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
+    {"name": "glob", "description": "Find files matching a glob pattern.",
+     "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
+    {"name": "todo_write", "description": "Create and manage a task list for your current coding session.",
+     "input_schema": {"type": "object", "properties": {"todos": {"type": "array", "items": {"type": "object", "properties": {"content": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["content", "status"]}}}, "required": ["todos"]}},
+    {"name": "task","description": "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
+     "input_schema": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]},}
+]
+
+# subagent 没有 subagent 功能
+SUB_TOOLS = [
+    {"name": "bash", "description": "Run a shell command.",
+     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
+    {"name": "read_file", "description": "Read file contents.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}}, "required": ["path"]}},
     {"name": "write_file", "description": "Write content to a file.",
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
     {"name": "edit_file", "description": "Replace exact text in a file once.",
@@ -63,12 +137,11 @@ TOOLS = [
 
 # ── Tool implementation ────────────────────────────────
 def run_bash(command: str) -> str:
-    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-    if any(d in command for d in dangerous):
+    if any(d in command for d in DENY_LIST):
         return "Error: Dangerous command blocked"
     try:
         r = subprocess.run(
-            command, shell=True, cwd=os.getcwd(),
+            command, shell=True, cwd=str(REPO_DIR),
             capture_output=True, text=True, timeout=120,
         )
         out = (r.stdout + r.stderr).strip()
@@ -84,11 +157,17 @@ def safe_path(p: str) -> Path:
         raise ValueError(f"Path escapes workspace: {p}")
     return path
 
-def run_read(path:str, limit: int | None = None) -> str:
+def run_read(path: str, offset: int = 0, limit: int | None = None) -> str:
     try:
-        lines = safe_path(path).read_text().splitlines()
-        if limit and limit < len(lines):
-            lines = lines[:limit] + [f"... ({len(lines) - limit}) more lines"]
+        all_lines = safe_path(path).read_text().splitlines()
+        total = len(all_lines)
+        offset = max(0, int(offset or 0))
+        limit = int(limit) if limit is not None else None
+        if offset > total:
+            offset = total
+        lines = all_lines[offset:]
+        if limit is not None and limit >= 0 and limit < len(lines):
+            lines = lines[:limit] + [f"... ({total - offset - limit}) more lines"]
         return "\n".join(lines)
     except Exception as e:
         return f"Error: {e}"
@@ -115,20 +194,103 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
 
 # 进行文件的通配
 def run_glob(pattern: str) -> str:
-    import glob as g
     try:
         results = []
-        for match in g.glob(pattern, root_dir=REPO_DIR):
+        for match in glob_module.glob(pattern, root_dir=REPO_DIR):
             if (REPO_DIR / match).resolve().is_relative_to(REPO_DIR):
                 results.append(match)
         return "\n".join(results) if results else "(no matches)"
     except Exception as e:
         return f"Error: {e}"
     
+def spawn_subagent(description: str) -> str:
+    """Spawn a subagent with fresh messages[], return summary only."""
+    print(f"\n\033[35m[Subagent spawned]\033[0m")
+
+    messages = [{"role": "user", "content": description}]  # fresh context
+    for _ in range(30):  # safety limit
+        response = client.messages.create(
+            model=MODEL, system=SUB_SYSTEM,
+            messages=messages, tools=SUB_TOOLS, max_tokens=100000,
+        )
+        messages.append({"role": "assistant", "content": response.content})
+
+        if response.stop_reason != "tool_use":
+            break
+        
+        results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                # Issue 1: subagent also runs hooks (permissions apply)
+                blocked = trigger_hooks("PreToolUse", block)
+                if blocked:
+                    results.append({"type": "tool_result", "tool_use_id": block.id,
+                                    "content": str(blocked)})
+                    continue
+
+                handler = SUB_HANDLERS.get(block.name)
+                output = safe_dispatch(handler, block.input) if handler else f"Unknown: {block.name}"
+                trigger_hooks("PostToolUse", block, output)
+
+                print(f"  \033[90m[sub] {block.name}: {str(output)[:100]}\033[0m")
+                results.append({"type": "tool_result", "tool_use_id": block.id,
+                                "content": output})
+        messages.append({"role": "user", "content": results})
+
+    # Issue 5: fallback if safety limit hit during tool_use
+    # extract_text 用于提取 llm 的 text 回复
+    # 如果最后一条不是 text，就可能是 tool_use 之类
+    result = extract_text(messages[-1]["content"])
+    if not result:
+        # last message is tool_result, look backwards for assistant text
+        # 然后就倒序往前查找，尝试提取文本
+        for msg in reversed(messages):
+            if msg["role"] == "assistant":
+                result = extract_text(msg["content"])
+                if result:
+                    break
+        # 如果还没找到，就表示没有最终回答
+        if not result:
+            result = "Subagent stopped after 30 turns without final answer."
+    print(f"\033[35m[Subagent done]\033[0m")
+    return result  # only summary, entire message history discarded
+    
+
+def safe_dispatch(handler, inputs: dict) -> str:
+    """Call handler with only the parameters it accepts; warn about unknowns."""
+    sig = inspect.signature(handler)
+    valid = {}
+    unknown = []
+    for k, v in inputs.items():
+        if k in sig.parameters:
+            valid[k] = v
+        else:
+            unknown.append(k)
+    if unknown:
+        print(f"\033[33m[WARN] Unknown arguments for {handler.__name__}: {unknown}\033[0m")
+    try:
+        return handler(**valid)
+    except TypeError as e:
+        return f"Error: bad arguments for {handler.__name__}: {e}"
+
+
 TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
-    "edit_file": run_edit, "glob": run_glob,
+    "edit_file": run_edit, "glob": run_glob, "todo_write": run_todo_write,
+    "task": spawn_subagent
 }
+
+SUB_HANDLERS = {
+    "bash": run_bash, "read_file": run_read, "write_file": run_write,
+    "edit_file": run_edit, "glob": run_glob
+}
+
+def extract_text(content) -> str:
+    """Extract text from message content blocks."""
+    if not isinstance(content, list):
+        return str(content)
+    return "\n".join(getattr(b, "text", "") for b in content if getattr(b, "type", None) == "text")
+
 
 # 为 agent 添加 hook
 # 他有一个定时出发机制，在我们的设计里，选择在四个时候触发
@@ -191,7 +353,9 @@ def permission_hook(block):
                 
     if block.name in ("write_file", "edit_file"):
         path = block.input.get("path", "")
-        if not (REPO_DIR / path).resolve().is_relative_to(REPO_DIR):
+        try:
+            safe_path(path)
+        except ValueError:
             print(f"\n\033[33m⚠  Writing outside workspace\033[0m")
             print(f"   Tool: {block.name}({block.input})")
             choice = input("   Allow? [y/N] ").strip().lower()
@@ -245,8 +409,20 @@ register_hook("Stop", summary_hook)
 # 然后进入循环，llm 根据这句话，判断是否要调用工具
 # 如果调用工具，就会把工具调用的结果重新输入 history，喂给 llm 进行下一步决策
 # 如果没有，则把对话内容返回给用户
+
+# 一个全局计数器，标志多长时间没有更新 todo
+# 如果长时间没有更新，就发送 prompt，让模型更新
+# 实现规划的功能
+rounds_since_todo = 0
 def agent_loop(messages: list):
+    global rounds_since_todo
+
     while True:
+        if rounds_since_todo >= 3 and messages:
+            messages.append({"role": "user", 
+                             "content": "<reminder>Update your todos.</reminder>"})
+            rounds_since_todo = 0
+
         response = client.messages.create(
             model=MODEL, system=SYSTEM, messages=messages,
             tools=TOOLS, max_tokens=8000,
@@ -262,7 +438,9 @@ def agent_loop(messages: list):
                 continue
             return
 
+        rounds_since_todo += 1
         results = []
+
         for block in response.content:
             if block.type == "tool_use":
                 blocked = trigger_hooks("PreToolUse", block)
@@ -274,12 +452,15 @@ def agent_loop(messages: list):
                                     "content": str(blocked)})
                     continue
 
-                handler = TOOL_HANDLERS[block.name]
-                output = handler(**block.input) if handler else f"Unknown {block.name}"
+                handler = TOOL_HANDLERS.get(block.name) # 健壮性
+                output = safe_dispatch(handler, block.input) if handler else f"Unknown {block.name}"
 
                 trigger_hooks("PostToolUse", block, output)
                 results.append({"type": "tool_result", "tool_use_id": block.id,
                                 "content": output})
+                
+                if block.name == "todo_write":
+                    rounds_since_todo = 0
 
         messages.append({"role": "user", "content": results})
 
@@ -292,11 +473,14 @@ if __name__ == "__main__":
     while True:
         try:
             query = input("\033[36m>> \033[0m")
-            trigger_hooks("UserPromptSubmit", query)
         except (EOFError, KeyboardInterrupt):
             break
+
         if query.strip().lower() in ("q", "exit", ""):
             break
+
+        trigger_hooks("UserPromptSubmit", query)
+
         history.append({"role": "user", "content": query})
         agent_loop(history)
         # 获取 llm 的回复
