@@ -14,14 +14,47 @@ def estimate_size(messages: str) -> int:
 
 # ── Level 1: snip middle messages ──────────────────────
 
+def _has_tool_use(msg) -> bool:
+    """Check if a message (assistant) contains tool_use blocks."""
+    content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+    if not isinstance(content, list):
+        return False
+    return any(getattr(b, "type", None) == "tool_use" for b in content)
+
+
+def _has_tool_result(msg) -> bool:
+    """Check if a message (user) contains tool_result blocks."""
+    content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+
+
 def snip_compact(messages, max_messages=50):
-    """Keep first 3 + last N-3 messages, replace middle with placeholder."""
+    """Keep first 3 + last N messages, preserving tool_use/tool_result pairs."""
     if len(messages) <= max_messages:
         return messages
-    keep_head, keep_tail = 3, max_messages - 3
-    snipped = len(messages) - keep_head - keep_tail
+
+    # Walk backward from the end, counting messages to keep.
+    # Tool_use/tool_result pairs count as one unit — never split.
+    keep_count = 0
+    i = len(messages) - 1
+    while i >= 3 and keep_count < max_messages - 3:
+        msg = messages[i]
+        if _has_tool_result(msg) and i > 0 and _has_tool_use(messages[i - 1]):
+            keep_count += 2  # pair stays together
+            i -= 2
+        else:
+            keep_count += 1
+            i -= 1
+
+    keep_tail = max(len(messages) - i - 1, 3)
+    snipped = len(messages) - 3 - keep_tail
+    if snipped <= 0:
+        return messages
+
     return (
-        messages[:keep_head]
+        messages[:3]
         + [{"role": "user", "content": f"[snipped {snipped} messages]"}]
         + messages[-keep_tail:]
     )
