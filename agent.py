@@ -80,8 +80,11 @@ def agent_loop(messages: list):
         team_msgs = agent_team.Mailbox("lead").read_all()
         if team_msgs:
             for m in team_msgs:
+                body = m['body']
+                if len(body) > 2000:
+                    body = body[:2000] + f"\n... (truncated, {len(m['body'])} chars total)"
                 messages.append({"role": "user",
-                                 "content": f"<agent-mail from=\"{m['from']}\">\n{m['body']}\n</agent-mail>"})
+                                 "content": f"<agent-mail from=\"{m['from']}\">\n{body}\n</agent-mail>"})
 
         # ── API call with 3-tier retry logic ─────────────
         max_tokens = 8000
@@ -264,8 +267,11 @@ if __name__ == "__main__":
         orphan_mail = agent_team.Mailbox("lead").read_all()
         if orphan_mail:
             for m in orphan_mail:
+                body = m['body']
+                if len(body) > 2000:
+                    body = body[:2000] + f"\n... (truncated, {len(m['body'])} chars total)"
                 history.append({"role": "user",
-                                "content": f"<agent-mail from=\"{m['from']}\">\n{m['body']}\n</agent-mail>"})
+                                "content": f"<agent-mail from=\"{m['from']}\">\n{body}\n</agent-mail>"})
             print()
 
         last = history[-1]["content"]
