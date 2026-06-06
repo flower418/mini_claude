@@ -12,6 +12,7 @@ from compact import run_compact
 from memory import search_memory, write_memory
 from task_system import run_create_task, run_claim_task, run_complete_task, run_list_tasks, run_get_task
 import background
+from background import should_background
 
 CURRENT_TODOS: list[dict] = []
 rounds_since_todo = 0
@@ -130,10 +131,14 @@ TOOLS = [
          []),
     TOOL("get_task", "Get full details of a specific task including dependents.",
          {"task_id": {"type": "string"}}),
-    TOOL("run_background", "Submit a complex subtask to run in the background (non-blocking). Use this for heavy analysis, large codebase scans, or tasks that would take many turns. Returns a task_id immediately; check back later with list_background or results will be injected automatically.",
+    TOOL("run_background", "Submit a complex subtask to run in the background (non-blocking, returns task_id immediately). Use when a task: requires heavy analysis, scans many files, would need 3+ tool calls, or blocks the user from continuing. For quick/simple tasks use inline tools instead. Tip: call judge_background first if unsure.",
          {"prompt": {"type": "string"},
           "focus": {"type": "string"}},
          ["prompt"]),
+    TOOL("judge_background", "Judge whether a task should run in background or inline. Returns verdict with reasons.",
+         {"subject": {"type": "string"},
+          "description": {"type": "string"}},
+         ["subject"]),
     TOOL("list_background", "List status of background tasks: running, completed (pending collection).",
          {}, []),
 ]
@@ -294,6 +299,11 @@ def run_background(prompt: str, focus: str = "") -> str:
     return f"Background task submitted: {task_id}\nCheck back with list_background or results will be injected automatically."
 
 
+def run_judge_background(subject: str, description: str = "") -> str:
+    """Judge whether a task should be backgrounded."""
+    return should_background(subject, description)
+
+
 def run_list_background() -> str:
     """List currently running and recently completed background tasks."""
     running = background.list_pending()
@@ -317,6 +327,7 @@ TOOL_HANDLERS = {
     "create_task": run_create_task, "claim_task": run_claim_task,
     "complete_task": run_complete_task, "list_tasks": run_list_tasks,
     "get_task": run_get_task, "run_background": run_background,
+    "judge_background": run_judge_background,
     "list_background": run_list_background,
 }
 
