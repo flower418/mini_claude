@@ -13,6 +13,7 @@ from memory import search_memory, write_memory
 from task_system import run_create_task, run_claim_task, run_complete_task, run_list_tasks, run_get_task
 import background
 from background import should_background
+import scheduler
 
 CURRENT_TODOS: list[dict] = []
 rounds_since_todo = 0
@@ -141,6 +142,16 @@ TOOLS = [
          ["subject"]),
     TOOL("list_background", "List status of background tasks: running, completed (pending collection).",
          {}, []),
+    TOOL("schedule_task", "Schedule a recurring or one-shot task. Use interval_seconds for periodic tasks or at_time for daily/one-shot tasks. The agent will be prompted automatically when due.",
+         {"subject": {"type": "string"},
+          "prompt": {"type": "string"},
+          "interval_seconds": {"type": "integer"},
+          "at_time": {"type": "string"}},
+         ["subject", "prompt"]),
+    TOOL("list_schedule", "List all scheduled tasks with next run times.",
+         {}, []),
+    TOOL("cancel_schedule", "Cancel and remove a scheduled task.",
+         {"task_id": {"type": "string"}}),
 ]
 
 SUB_TOOLS = [
@@ -319,6 +330,20 @@ def run_list_background() -> str:
     return "\n".join(lines)
 
 
+# ── Scheduler tool handlers ─────────────────────────────
+
+def run_schedule_task(subject: str, prompt: str, interval_seconds: int = 0, at_time: str = "") -> str:
+    return scheduler.add_schedule(subject, prompt, interval_seconds, at_time)
+
+
+def run_list_schedule() -> str:
+    return scheduler.list_schedules()
+
+
+def run_cancel_schedule(task_id: str) -> str:
+    return scheduler.cancel_schedule(task_id)
+
+
 TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob, "todo_write": run_todo_write,
@@ -330,6 +355,8 @@ TOOL_HANDLERS = {
     "get_task": run_get_task, "run_background": run_background,
     "judge_background": run_judge_background,
     "list_background": run_list_background,
+    "schedule_task": run_schedule_task, "list_schedule": run_list_schedule,
+    "cancel_schedule": run_cancel_schedule,
 }
 
 SUB_HANDLERS = {

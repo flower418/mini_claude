@@ -1,5 +1,7 @@
 # ── Agent entry point & main loop ───────────────────────
 import json
+import select
+import sys
 import time
 
 try:
@@ -19,6 +21,7 @@ from config import MODEL, MODEL_FALLBACK, client, extract_text
 from skills import get_system_prompt
 import tools
 import background
+import scheduler
 from compact import preprocess_pipeline, estimate_size, compact_history, emergency_compact, CONTEXT_LIMIT
 from hooks import trigger_hooks, init_hooks
 
@@ -190,21 +193,53 @@ def agent_loop(messages: list):
 # ── Entry point ────────────────────────────────────────
 if __name__ == "__main__":
     print("mini_claude agent — 输入问题，回车发送。q 退出。\n")
+    scheduler.start()
 
     history = []
     while True:
-        try:
-            query = input("\033[36m>> \033[0m")
-        except (EOFError, KeyboardInterrupt):
-            break
+        # Layer 3: check scheduler queue first
+        task = scheduler.dequeue()
+        if task:
+            query = f"[Scheduled: {task['subject']}]\n{task['prompt']}"
+            print(f"\n\033[33m[Scheduled] {task['subject']}\033[0m")
+        else:
+            # Wait for user input with 1s timeout to re-check queue
+            print("\033[36m>> \033[0m", end="", flush=True)
+            query = None
+            while query is None:
+                if select.select([sys.stdin], [], [], 1.0)[0]:
+                    try:
+                        query = sys.stdin.readline().rstrip("\n")
+                    except (EOFError, KeyboardInterrupt):
+                        break
+                else:
+                    task = scheduler.dequeue()
+                    if task:
+                        query = f"[Scheduled: {task['subject']}]\n{task['prompt']}"
+                        print(f"\n\033[33m[Scheduled] {task['subject']}\033[0m")
+                        break
+            if query is None:
+                break
 
-        if query.strip().lower() in ("q", "exit", ""):
+        if query.strip().lower() in ("q", "exit"):
             break
+        if not query.strip():
+            continue
 
         trigger_hooks("UserPromptSubmit", query)
         history.append({"role": "user", "content": query})
         tools.rounds_since_memory = 0  # new query → encourage fresh memory check
         agent_loop(history)
+
+        # Run any additional queued tasks that arrived during processing
+        while True:
+            task = scheduler.dequeue()
+            if not task:
+                break
+            query = f"[Scheduled: {task['subject']}]\n{task['prompt']}"
+            print(f"\n\033[33m[Scheduled] {task['subject']}\033[0m")
+            history.append({"role": "user", "content": query})
+            agent_loop(history)
 
         # ── Collect orphaned background results ─────────
         orphans = background.collect()
