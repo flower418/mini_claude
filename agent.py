@@ -233,6 +233,7 @@ if __name__ == "__main__":
                 break
 
         if query.strip().lower() in ("q", "exit"):
+            agent_team.cleanup_stale()  # clean lead's own inbox on exit
             break
         if not query.strip():
             continue
