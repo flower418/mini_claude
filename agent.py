@@ -18,6 +18,7 @@ memory.init_memory()
 from config import MODEL, MODEL_FALLBACK, client, extract_text
 from skills import get_system_prompt
 import tools
+import background
 from compact import preprocess_pipeline, estimate_size, compact_history, emergency_compact, CONTEXT_LIMIT
 from hooks import trigger_hooks, init_hooks
 
@@ -62,6 +63,14 @@ def agent_loop(messages: list):
         if estimate_size(json.dumps(messages, default=str)) > CONTEXT_LIMIT:
             print(f"\033[33m[compact] Context over limit, running LLM compaction...\033[0m")
             messages[:] = compact_history(messages)
+
+        # ── Collect background results ──────────────────
+        bg_results = background.collect()
+        if bg_results:
+            for task_id, result in bg_results:
+                messages.append({"role": "user",
+                                 "content": f"<background-result task_id=\"{task_id}\">\n{result}\n</background-result>"})
+                print(f"\033[90m[bg] Injected result: {task_id} ({len(result)} chars)\033[0m")
 
         # ── API call with 3-tier retry logic ─────────────
         max_tokens = 8000

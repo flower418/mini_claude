@@ -11,6 +11,7 @@ from hooks import trigger_hooks
 from compact import run_compact
 from memory import search_memory, write_memory
 from task_system import run_create_task, run_claim_task, run_complete_task, run_list_tasks, run_get_task
+import background
 
 CURRENT_TODOS: list[dict] = []
 rounds_since_todo = 0
@@ -129,6 +130,12 @@ TOOLS = [
          []),
     TOOL("get_task", "Get full details of a specific task including dependents.",
          {"task_id": {"type": "string"}}),
+    TOOL("run_background", "Submit a complex subtask to run in the background (non-blocking). Use this for heavy analysis, large codebase scans, or tasks that would take many turns. Returns a task_id immediately; check back later with list_background or results will be injected automatically.",
+         {"prompt": {"type": "string"},
+          "focus": {"type": "string"}},
+         ["prompt"]),
+    TOOL("list_background", "List status of background tasks: running, completed (pending collection).",
+         {}, []),
 ]
 
 SUB_TOOLS = [
@@ -276,6 +283,31 @@ def safe_dispatch(handler, inputs: dict) -> str:
         return f"Error: bad arguments for {handler.__name__}: {e}"
 
 
+# ── Background task handlers ────────────────────────────
+
+def run_background(prompt: str, focus: str = "") -> str:
+    """Submit a complex subtask to run in a background thread."""
+    if not prompt.strip():
+        return "Error: prompt is required"
+    full_prompt = f"Focus: {focus}\n\n{prompt}" if focus else prompt
+    task_id = background.submit(full_prompt)
+    return f"Background task submitted: {task_id}\nCheck back with list_background or results will be injected automatically."
+
+
+def run_list_background() -> str:
+    """List currently running and recently completed background tasks."""
+    running = background.list_pending()
+    lines = []
+    if running:
+        lines.append(f"\033[36m▸\033[0m Running ({len(running)}): {', '.join(running)}")
+    else:
+        lines.append("No running background tasks.")
+    pending = background.pending_count()
+    if pending > len(running):
+        lines.append(f"(pending collection: {pending - len(running)} completed)")
+    return "\n".join(lines) if lines else "No background tasks."
+
+
 TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob, "todo_write": run_todo_write,
@@ -284,7 +316,8 @@ TOOL_HANDLERS = {
     "memory_write": write_memory,
     "create_task": run_create_task, "claim_task": run_claim_task,
     "complete_task": run_complete_task, "list_tasks": run_list_tasks,
-    "get_task": run_get_task,
+    "get_task": run_get_task, "run_background": run_background,
+    "list_background": run_list_background,
 }
 
 SUB_HANDLERS = {
