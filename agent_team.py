@@ -101,11 +101,13 @@ class Mailbox:
 # ── Lifecycle ────────────────────────────────────────────
 
 def cleanup_stale():
-    """Remove .agents/ dirs from previous sessions."""
+    """Remove all .agents/ dirs including lead's from previous sessions."""
     if AGENTS_DIR.exists():
         for d in AGENTS_DIR.iterdir():
             if d.is_dir():
                 shutil.rmtree(d)
+        # Re-create lead's mailbox dir
+        Mailbox(LEAD_NAME)
         print(f"\033[90m[team] Cleaned stale agent dirs\033[0m")
 
 
@@ -137,7 +139,7 @@ def _send_envelope(to_agent: str, body: str, msg_type: str = TYPE_TASK, request_
                 "status": "pending", "timestamp": time.time(),
             }
     type_label = f"[{msg_type}]" if msg_type != TYPE_TASK else ""
-    print(f"\033[90m[team] {sender} → {to_agent}: {type_label} {body[:60]}\033[0m")
+    print(f"\033[90m[team] {sender} → {to_agent}: {type_label}\033[0m")
     return f"Sent {type_label} to '{to_agent}'" + (f" (req: {request_id})" if request_id else "")
 
 
@@ -247,7 +249,8 @@ def _agent_loop(name: str, role: str, system_prompt: str):
                     handler = SUB_HANDLERS.get(block.name)
                     output = safe_dispatch(handler, block.input) if handler else f"Unknown tool: {block.name}"
                     results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
-                    print(f"  \033[90m[team:{name}] {block.name}: {output[:100]}\033[0m")
+                    if block.name not in ("check_agent_mail", "send_to_agent"):
+                        print(f"  \033[90m[{name}] {block.name}\033[0m")
                     # Track if shutdown was accepted
                     if block.name == "respond_request":
                         inp = block.input
@@ -270,7 +273,7 @@ def _agent_loop(name: str, role: str, system_prompt: str):
                     break
         if result and not shutdown_msgs:  # don't send result for shutdown-only interactions
             lead_mail.send(name, result)
-            print(f"\033[90m[team:{name}] → lead ({len(result)} chars)\033[0m")
+            print(f"\033[90m  [{name}] → lead ({len(result)} chars)\033[0m")
 
 
 # ── Public API (tool handlers) ───────────────────────────

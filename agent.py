@@ -83,7 +83,6 @@ def agent_loop(messages: list):
             for m in team_msgs:
                 messages.append({"role": "user",
                                  "content": f"<agent-mail from=\"{m['from']}\">\n{m['body']}\n</agent-mail>"})
-                print(f"\033[90m[team] Mail from {m['from']} ({len(m['body'])} chars)\033[0m")
 
         # ── API call with 3-tier retry logic ─────────────
         max_tokens = 8000
