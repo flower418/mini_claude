@@ -2,9 +2,12 @@
 import hashlib
 import json
 import re
+import threading
 import time
 
 from config import TASK_DIR
+
+_io_lock = threading.Lock()
 
 
 def _task_path(task_id: str):
@@ -13,14 +16,17 @@ def _task_path(task_id: str):
 
 def _load_task(task_id: str) -> dict | None:
     path = _task_path(task_id)
-    if not path.exists():
-        return None
-    return json.loads(path.read_text())
+    with _io_lock:
+        if not path.exists():
+            return None
+        return json.loads(path.read_text())
 
 
 def _save_task(task: dict):
     TASK_DIR.mkdir(parents=True, exist_ok=True)
-    _task_path(task["id"]).write_text(json.dumps(task, indent=2, ensure_ascii=False))
+    data = json.dumps(task, indent=2, ensure_ascii=False)
+    with _io_lock:
+        _task_path(task["id"]).write_text(data)
 
 
 def _generate_id(subject: str) -> str:

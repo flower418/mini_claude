@@ -170,7 +170,6 @@ def _try_auto_claim(agent_name: str) -> dict | None:
             continue
         if t.get("owner"):
             continue
-        # Check blockedBy
         blocked = False
         for bid in t.get("blockedBy", []):
             dep = next((d for d in tasks if d["id"] == bid), None)
@@ -179,11 +178,11 @@ def _try_auto_claim(agent_name: str) -> dict | None:
                 break
         if blocked:
             continue
-        # Claim it
         result = run_claim_task(t["id"], agent_name)
         if "Claimed" in result:
             print(f"\033[90m  [{agent_name}] auto-claimed: {t['subject']}\033[0m")
             return t
+        # else: someone else claimed it first, try next
     return None
 
 
