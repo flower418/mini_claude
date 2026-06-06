@@ -1,109 +1,171 @@
-# ── 4-layer scheduler: thread → queue → processor → execute ──
-# Layer 1: Scheduler thread checks every 1s if tasks are due
-# Layer 2: Due tasks are pushed to an in-memory queue
+# ── 4-layer scheduler with CronJob model ─────────────────
+# Layer 1: Scheduler thread checks every 1s if any CronJob is due
+# Layer 2: Due jobs are pushed to an in-memory queue
 # Layer 3: Entry point dequeues and injects when agent is idle
 # Layer 4: Agent processes the injected prompt, result goes into history
 import hashlib
 import json
 import threading
 import time
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 
 from config import SCHEDULE_DIR
 
-_queue: list[dict] = []
+
+# ── Cron parser (five-field: minute hour day month weekday) ─
+
+_FIELD_RANGES = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]  # 0/7 = Sunday
+
+
+def _parse_field(field: str, lo: int, hi: int) -> set[int]:
+    """Parse a single cron field into a set of valid integer values."""
+    if field == "*":
+        return set(range(lo, hi + 1))
+    values: set[int] = set()
+    for part in field.split(","):
+        part = part.strip()
+        if "/" in part:
+            base, step = part.split("/")
+            step = int(step)
+            if base == "*":
+                base_range = range(lo, hi + 1)
+            elif "-" in base:
+                a, b = map(int, base.split("-"))
+                base_range = range(a, b + 1)
+            else:
+                base_range = range(int(base), hi + 1)
+            values.update(n for n in base_range if (n - lo) % step == 0)
+        elif "-" in part:
+            a, b = map(int, part.split("-"))
+            values.update(range(a, b + 1))
+        else:
+            values.add(int(part))
+    return values & set(range(lo, hi + 1))
+
+
+def _cron_matches(cron: str, dt: datetime) -> bool:
+    """Check whether a datetime satisfies a cron expression."""
+    fields = cron.strip().split()
+    if len(fields) != 5:
+        return False
+    targets = [
+        dt.minute, dt.hour, dt.day, dt.month,
+        dt.isoweekday() % 7,  # ISO weekday 1-7 → 0-6
+    ]
+    for i, (field, target) in enumerate(zip(fields, targets)):
+        valid = _parse_field(field, *_FIELD_RANGES[i])
+        if target not in valid:
+            return False
+    return True
+
+
+def _next_cron(cron: str, after: float) -> float | None:
+    """Walk forward minute by minute to find the next matching timestamp."""
+    fields = cron.strip().split()
+    if len(fields) != 5:
+        return None
+    dt = datetime.fromtimestamp(after) + timedelta(minutes=1)
+    dt = dt.replace(second=0, microsecond=0)
+    # Walk forward at most 2 years to avoid infinite loop
+    deadline = dt + timedelta(days=730)
+    while dt <= deadline:
+        if _cron_matches(cron, dt):
+            return dt.timestamp()
+        dt += timedelta(minutes=1)
+    return None
+
+
+# ── CronJob model ────────────────────────────────────────
+
+@dataclass
+class CronJob:
+    id: str
+    cron: str               # "0 9 * * *" five-field cron
+    prompt: str             # injected as user message when triggered
+    recurring: bool = True  # False = one-shot, auto-disables after fire
+    durable: bool = True    # False = memory only, lost on restart
+    last_run: float | None = None
+    next_run: float | None = None
+    created_at: str = ""
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CronJob":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+# ── State ────────────────────────────────────────────────
+
+_queue: list[CronJob] = []
 _lock = threading.Lock()
 _running = False
 _thread: threading.Thread | None = None
+_memory_jobs: dict[str, CronJob] = {}  # non-durable jobs
 
-
-# ── Persistence ─────────────────────────────────────────
 
 def _schedule_path(task_id: str):
     return SCHEDULE_DIR / f"{task_id}.json"
 
 
-def _load_all() -> list[dict]:
+# ── Persistence (durable jobs only) ──────────────────────
+
+def _load_durable() -> list[CronJob]:
     if not SCHEDULE_DIR.exists():
         return []
-    tasks = []
+    jobs = []
     for f in sorted(SCHEDULE_DIR.glob("*.json")):
         try:
-            tasks.append(json.loads(f.read_text()))
-        except json.JSONDecodeError:
+            d = json.loads(f.read_text())
+            jobs.append(CronJob.from_dict(d))
+        except (json.JSONDecodeError, TypeError):
             continue
-    return tasks
+    return jobs
 
 
-def _save(task: dict):
+def _save_durable(job: CronJob):
     SCHEDULE_DIR.mkdir(parents=True, exist_ok=True)
-    _schedule_path(task["id"]).write_text(json.dumps(task, indent=2, ensure_ascii=False))
+    _schedule_path(job.id).write_text(json.dumps(job.to_dict(), indent=2, ensure_ascii=False))
 
 
-def _delete(task_id: str):
+def _delete_durable(task_id: str):
     path = _schedule_path(task_id)
     if path.exists():
         path.unlink()
 
 
-# ── Next-run computation ────────────────────────────────
-
-def _compute_next(task: dict, now: float) -> float | None:
-    """Return the next unix timestamp this task should fire, or None if done."""
-    interval = task.get("interval_seconds")
-    at_time = task.get("at_time")
-
-    if interval:
-        last = task.get("last_run", 0)
-        # If never run, schedule immediately
-        if not last:
-            return now
-        return last + interval
-
-    if at_time:
-        try:
-            if "T" in at_time:
-                # ISO datetime: "2026-06-06T15:00:00" — one-shot
-                return datetime.fromisoformat(at_time).timestamp()
-            else:
-                # "HH:MM" — daily recurring
-                h, m = map(int, at_time.split(":"))
-                now_dt = datetime.fromtimestamp(now)
-                target = now_dt.replace(hour=h, minute=m, second=0, microsecond=0)
-                if target.timestamp() <= now:
-                    target += timedelta(days=1)
-                return target.timestamp()
-        except (ValueError, OverflowError):
-            return None
-
-    return None
+def _all_jobs() -> list[CronJob]:
+    """All active jobs: durable (disk) + non-durable (memory)."""
+    jobs = _load_durable()
+    # Merge memory-only jobs
+    for mj in _memory_jobs.values():
+        jobs.append(mj)
+    return jobs
 
 
 # ── Layer 1+2: Scheduler thread ─────────────────────────
 
 def _scheduler_loop():
-    """Background thread: every 1s, check all tasks, push due ones to queue."""
     global _running
     while _running:
         now = time.time()
-        for task in _load_all():
-            if not task.get("enabled", True):
-                continue
-            next_run = task.get("next_run")
-            if next_run and next_run <= now:
+        for job in _all_jobs():
+            if job.next_run and job.next_run <= now:
                 with _lock:
-                    _queue.append({
-                        "id": task["id"],
-                        "subject": task["subject"],
-                        "prompt": task["prompt"],
-                    })
-                task["last_run"] = now
-                new_next = _compute_next(task, now)
-                task["next_run"] = new_next
-                if new_next is None:
-                    task["enabled"] = False
-                _save(task)
-                print(f"\033[90m[sched] Triggered: {task['subject']}\033[0m")
+                    _queue.append(job)
+                job.last_run = now
+                if job.recurring:
+                    job.next_run = _next_cron(job.cron, now)
+                else:
+                    job.next_run = None  # one-shot done
+                if job.durable:
+                    _save_durable(job)
+                else:
+                    _memory_jobs[job.id] = job
+                print(f"\033[90m[sched] Triggered: {job.id}\033[0m")
         time.sleep(1)
 
 
@@ -115,25 +177,19 @@ def start():
     _running = True
     _thread = threading.Thread(target=_scheduler_loop, daemon=True)
     _thread.start()
-    # Load existing tasks and compute next_run for any that don't have it
+    # Init next_run for any durable jobs that don't have one
     now = time.time()
-    for task in _load_all():
-        if task.get("enabled", True) and not task.get("next_run"):
-            task["next_run"] = _compute_next(task, now)
-            _save(task)
-    print(f"\033[90m[sched] Started ({len(_load_all())} tasks loaded)\033[0m")
+    for job in _load_durable():
+        if not job.next_run:
+            job.next_run = _next_cron(job.cron, now)
+            _save_durable(job)
+    print(f"\033[90m[sched] Started ({len(_all_jobs())} jobs loaded)\033[0m")
 
 
 # ── Layer 3: Queue interface ────────────────────────────
 
-def enqueue(task: dict):
-    """Push a task directly to the execution queue (for immediate/one-shot)."""
-    with _lock:
-        _queue.append(task)
-
-
-def dequeue() -> dict | None:
-    """Pop next task from queue. Returns None if empty."""
+def dequeue() -> CronJob | None:
+    """Pop next scheduled job from queue. Returns None if empty."""
     with _lock:
         return _queue.pop(0) if _queue else None
 
@@ -145,63 +201,75 @@ def queue_size() -> int:
 
 # ── CRUD for tools ──────────────────────────────────────
 
-def add_schedule(subject: str, prompt: str, interval_seconds: int = 0, at_time: str = "") -> str:
-    """Create a new scheduled task. Persist to disk."""
-    if not subject.strip() or not prompt.strip():
-        return "Error: subject and prompt are required"
-    if not interval_seconds and not at_time:
-        return "Error: specify interval_seconds or at_time"
+def add_schedule(
+    id: str = "",
+    cron: str = "* * * * *",
+    prompt: str = "",
+    recurring: bool = True,
+    durable: bool = True,
+) -> str:
+    """Create a new CronJob."""
+    if not prompt.strip():
+        return "Error: prompt is required"
+    cron = cron.strip()
+    fields = cron.split()
+    if len(fields) != 5:
+        return f"Error: cron must be 5 fields (got {len(fields)}): minute hour day month weekday"
 
-    task_id = "sched_" + hashlib.md5(f"{subject}{time.time()}".encode()).hexdigest()[:8]
+    job_id = id.strip() if id.strip() else "sched_" + hashlib.md5(f"{cron}{prompt}{time.time()}".encode()).hexdigest()[:8]
     now = time.time()
-    task = {
-        "id": task_id,
-        "subject": subject.strip(),
-        "prompt": prompt.strip(),
-        "interval_seconds": interval_seconds,
-        "at_time": at_time,
-        "enabled": True,
-        "last_run": None,
-        "next_run": _compute_next({
-            "interval_seconds": interval_seconds,
-            "at_time": at_time,
-            "last_run": None,
-        }, now),
-        "created_at": datetime.fromtimestamp(now).isoformat(),
-    }
-    _save(task)
-    next_str = datetime.fromtimestamp(task["next_run"]).strftime("%Y-%m-%d %H:%M:%S") if task["next_run"] else "N/A"
-    print(f"\033[90m[sched] Added: {task_id} (next: {next_str})\033[0m")
-    return f"Scheduled '{task_id}': {subject}\nNext run: {next_str}"
+    next_run = _next_cron(cron, now)
+
+    job = CronJob(
+        id=job_id,
+        cron=cron,
+        prompt=prompt.strip(),
+        recurring=recurring,
+        durable=durable,
+        last_run=None,
+        next_run=next_run,
+        created_at=datetime.fromtimestamp(now).isoformat(),
+    )
+    if durable:
+        _save_durable(job)
+    else:
+        _memory_jobs[job_id] = job
+
+    next_str = datetime.fromtimestamp(next_run).strftime("%Y-%m-%d %H:%M:%S") if next_run else "N/A"
+    storage = "disk" if durable else "memory"
+    print(f"\033[90m[sched] Added: {job_id} ({storage}, next: {next_str})\033[0m")
+    return f"Scheduled '{job_id}': {prompt[:60]}\ncron: {cron}  recurring: {recurring}  storage: {storage}  next: {next_str}"
 
 
 def list_schedules() -> str:
-    """List all scheduled tasks with their next run time."""
-    tasks = _load_all()
-    if not tasks:
-        return "(no scheduled tasks)"
+    """List all scheduled CronJobs."""
+    jobs = _all_jobs()
+    if not jobs:
+        return "(no scheduled jobs)"
     lines = []
-    for t in tasks:
-        icon = "\033[32m✓\033[0m" if t.get("enabled", True) else "\033[31m✗\033[0m"
-        next_str = "N/A"
-        if t.get("next_run"):
-            next_str = datetime.fromtimestamp(t["next_run"]).strftime("%Y-%m-%d %H:%M:%S")
-        interval = f" every {t['interval_seconds']}s" if t.get("interval_seconds") else ""
-        at_str = f" at {t['at_time']}" if t.get("at_time") else ""
-        last = f" (last: {datetime.fromtimestamp(t['last_run']).strftime('%H:%M:%S')})" if t.get("last_run") else " (never)"
-        lines.append(f"  [{icon}] {t['id']}: {t['subject']}{interval}{at_str} → next {next_str}{last}")
+    for j in jobs:
+        next_str = datetime.fromtimestamp(j.next_run).strftime("%Y-%m-%d %H:%M:%S") if j.next_run else "done"
+        last_str = datetime.fromtimestamp(j.last_run).strftime("%H:%M:%S") if j.last_run else "never"
+        recur = "\033[32m↻\033[0m" if j.recurring else "\033[33m1\033[0m"
+        storage = "💾" if j.durable else "🧠"
+        lines.append(f"  {storage} {recur} {j.id}: {j.prompt[:50]}  [{j.cron}]  next={next_str}  last={last_str}")
     return "\n".join(lines)
 
 
 def cancel_schedule(task_id: str) -> str:
-    """Remove a scheduled task."""
-    task = None
-    for t in _load_all():
-        if t["id"] == task_id:
-            task = t
+    """Remove a scheduled job (both disk and memory)."""
+    found = False
+    # Check durable
+    for job in _load_durable():
+        if job.id == task_id:
+            _delete_durable(task_id)
+            found = True
             break
-    if task is None:
+    # Check memory
+    if task_id in _memory_jobs:
+        del _memory_jobs[task_id]
+        found = True
+    if not found:
         return f"Error: schedule '{task_id}' not found"
-    _delete(task_id)
     print(f"\033[90m[sched] Cancelled: {task_id}\033[0m")
-    return f"Cancelled schedule '{task_id}': {task['subject']}"
+    return f"Cancelled schedule '{task_id}'"

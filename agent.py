@@ -198,10 +198,10 @@ if __name__ == "__main__":
     history = []
     while True:
         # Layer 3: check scheduler queue first
-        task = scheduler.dequeue()
-        if task:
-            query = f"[Scheduled: {task['subject']}]\n{task['prompt']}"
-            print(f"\n\033[33m[Scheduled] {task['subject']}\033[0m")
+        job = scheduler.dequeue()
+        if job:
+            query = f"[Scheduled: {job.id}]\n{job.prompt}"
+            print(f"\n\033[33m[Scheduled] {job.id}\033[0m")
         else:
             # Wait for user input with 1s timeout to re-check queue
             print("\033[36m>> \033[0m", end="", flush=True)
@@ -213,10 +213,10 @@ if __name__ == "__main__":
                     except (EOFError, KeyboardInterrupt):
                         break
                 else:
-                    task = scheduler.dequeue()
-                    if task:
-                        query = f"[Scheduled: {task['subject']}]\n{task['prompt']}"
-                        print(f"\n\033[33m[Scheduled] {task['subject']}\033[0m")
+                    job = scheduler.dequeue()
+                    if job:
+                        query = f"[Scheduled: {job.id}]\n{job.prompt}"
+                        print(f"\n\033[33m[Scheduled] {job.id}\033[0m")
                         break
             if query is None:
                 break
@@ -233,11 +233,11 @@ if __name__ == "__main__":
 
         # Run any additional queued tasks that arrived during processing
         while True:
-            task = scheduler.dequeue()
-            if not task:
+            job = scheduler.dequeue()
+            if not job:
                 break
-            query = f"[Scheduled: {task['subject']}]\n{task['prompt']}"
-            print(f"\n\033[33m[Scheduled] {task['subject']}\033[0m")
+            query = f"[Scheduled: {job.id}]\n{job.prompt}"
+            print(f"\n\033[33m[Scheduled] {job.id}\033[0m")
             history.append({"role": "user", "content": query})
             agent_loop(history)
 

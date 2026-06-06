@@ -142,12 +142,13 @@ TOOLS = [
          ["subject"]),
     TOOL("list_background", "List status of background tasks: running, completed (pending collection).",
          {}, []),
-    TOOL("schedule_task", "Schedule a recurring or one-shot task. Use interval_seconds for periodic tasks or at_time for daily/one-shot tasks. The agent will be prompted automatically when due.",
-         {"subject": {"type": "string"},
+    TOOL("schedule_task", "Schedule a CronJob (five-field cron: minute hour day month weekday). Set recurring=false for one-shot, durable=false for memory-only (lost on restart).",
+         {"id": {"type": "string"},
+          "cron": {"type": "string"},
           "prompt": {"type": "string"},
-          "interval_seconds": {"type": "integer"},
-          "at_time": {"type": "string"}},
-         ["subject", "prompt"]),
+          "recurring": {"type": "boolean"},
+          "durable": {"type": "boolean"}},
+         ["cron", "prompt"]),
     TOOL("list_schedule", "List all scheduled tasks with next run times.",
          {}, []),
     TOOL("cancel_schedule", "Cancel and remove a scheduled task.",
@@ -332,8 +333,8 @@ def run_list_background() -> str:
 
 # ── Scheduler tool handlers ─────────────────────────────
 
-def run_schedule_task(subject: str, prompt: str, interval_seconds: int = 0, at_time: str = "") -> str:
-    return scheduler.add_schedule(subject, prompt, interval_seconds, at_time)
+def run_schedule_task(id: str = "", cron: str = "* * * * *", prompt: str = "", recurring: bool = True, durable: bool = True) -> str:
+    return scheduler.add_schedule(id, cron, prompt, recurring, durable)
 
 
 def run_list_schedule() -> str:
