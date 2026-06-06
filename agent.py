@@ -206,6 +206,18 @@ if __name__ == "__main__":
         tools.rounds_since_memory = 0  # new query → encourage fresh memory check
         agent_loop(history)
 
+        # ── Collect orphaned background results ─────────
+        orphans = background.collect()
+        if orphans:
+            print(f"\033[33m[bg] Orphaned results (arrived after loop ended):\033[0m")
+            for task_id, result in orphans:
+                print(f"  \033[90m── {task_id} ──\033[0m\n{result[:500]}")
+                if len(result) > 500:
+                    print(f"  \033[90m... ({len(result)} chars total)\033[0m")
+                history.append({"role": "user",
+                                "content": f"<background-result task_id=\"{task_id}\">\n{result}\n</background-result>"})
+            print()
+
         last = history[-1]["content"]
         if isinstance(last, list):
             for block in last:

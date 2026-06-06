@@ -221,8 +221,9 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
 
 def run_glob(pattern: str) -> str:
     try:
+        recursive = "**" in pattern
         results = []
-        for match in glob_module.glob(pattern, root_dir=REPO_DIR):
+        for match in glob_module.glob(pattern, root_dir=REPO_DIR, recursive=recursive):
             if (REPO_DIR / match).resolve().is_relative_to(REPO_DIR):
                 results.append(match)
         return "\n".join(results) if results else "(no matches)"
@@ -307,15 +308,15 @@ def run_judge_background(subject: str, description: str = "") -> str:
 def run_list_background() -> str:
     """List currently running and recently completed background tasks."""
     running = background.list_pending()
+    done = background.list_done()
     lines = []
     if running:
         lines.append(f"\033[36m▸\033[0m Running ({len(running)}): {', '.join(running)}")
-    else:
-        lines.append("No running background tasks.")
-    pending = background.pending_count()
-    if pending > len(running):
-        lines.append(f"(pending collection: {pending - len(running)} completed)")
-    return "\n".join(lines) if lines else "No background tasks."
+    if done:
+        lines.append(f"\033[32m✓\033[0m Done, awaiting collection ({len(done)}): {', '.join(done)}")
+    if not running and not done:
+        lines.append("No background tasks.")
+    return "\n".join(lines)
 
 
 TOOL_HANDLERS = {

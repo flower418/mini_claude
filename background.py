@@ -114,3 +114,9 @@ def list_pending() -> list[str]:
     """List IDs of still-running background tasks."""
     with _lock:
         return list(_futures.keys())
+
+
+def list_done() -> list[str]:
+    """List IDs of completed tasks waiting for collection."""
+    with _lock:
+        return list(_results.keys())
