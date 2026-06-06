@@ -23,6 +23,7 @@ import tools
 import background
 import scheduler
 import agent_team
+import mcp_client
 agent_team.cleanup_stale()
 from compact import preprocess_pipeline, estimate_size, compact_history, emergency_compact, CONTEXT_LIMIT
 from hooks import trigger_hooks, init_hooks
@@ -99,7 +100,7 @@ def agent_loop(messages: list):
                 try:
                     response = client.messages.create(
                         model=current_model, system=get_system_prompt(), messages=messages,
-                        tools=tools.TOOLS, max_tokens=max_tokens,
+                        tools=tools.TOOLS + mcp_client.get_mcp_tools(), max_tokens=max_tokens,
                     )
                     break
                 except Exception as e:
@@ -187,7 +188,12 @@ def agent_loop(messages: list):
                     continue
 
                 handler = tools.TOOL_HANDLERS.get(block.name)
-                output = tools.safe_dispatch(handler, block.input) if handler else f"Unknown {block.name}"
+                if handler:
+                    output = tools.safe_dispatch(handler, block.input)
+                elif block.name.startswith("mcp_"):
+                    output = mcp_client.call_mcp_tool(block.name, block.input)
+                else:
+                    output = f"Unknown {block.name}"
 
                 trigger_hooks("PostToolUse", block, output)
                 results.append({"type": "tool_result", "tool_use_id": block.id,

@@ -19,6 +19,7 @@ from agent_team import (
     request_shutdown, request_plan, respond_request, approve_request, reject_request,
 )
 import worktree
+import mcp_client
 
 CURRENT_TODOS: list[dict] = []
 rounds_since_todo = 0
@@ -193,6 +194,13 @@ TOOLS = [
          {"task_id": {"type": "string"}}),
     TOOL("discard_worktree", "Delete a worktree without merging.",
          {"task_id": {"type": "string"}}),
+    TOOL("mcp_connect", "Connect to an MCP server to add its tools. command is the executable (e.g. 'npx', 'python'), args are arguments.",
+         {"name": {"type": "string"},
+          "command": {"type": "string"},
+          "args": {"type": "array", "items": {"type": "string"}}},
+         ["name", "command"]),
+    TOOL("mcp_list_servers", "List connected MCP servers and their tool counts.",
+         {}, []),
 ]
 
 SUB_TOOLS = [
@@ -459,6 +467,14 @@ def run_discard_worktree(task_id: str) -> str:
     return worktree.discard(task_id)
 
 
+def run_mcp_connect(name: str, command: str, args: list[str] | None = None) -> str:
+    return mcp_client.connect_server(name, command, args or [])
+
+
+def run_mcp_list_servers() -> str:
+    return mcp_client.list_servers()
+
+
 TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob, "todo_write": run_todo_write,
@@ -479,6 +495,7 @@ TOOL_HANDLERS = {
     "request_plan": run_request_plan, "respond_request": run_respond_request,
     "list_worktrees": run_list_worktrees, "merge_worktree": run_merge_worktree,
     "discard_worktree": run_discard_worktree,
+    "mcp_connect": run_mcp_connect, "mcp_list_servers": run_mcp_list_servers,
 }
 
 SUB_HANDLERS = {
