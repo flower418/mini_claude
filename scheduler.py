@@ -13,9 +13,16 @@ from datetime import datetime, timedelta
 from config import SCHEDULE_DIR
 
 
-# ── Cron parser (five-field: minute hour day month weekday) ─
+# ── Cron parser (five or six-field: [sec] minute hour day month weekday) ─
 
-_FIELD_RANGES = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]  # 0/7 = Sunday
+_FIELD_RANGES = [
+    (0, 59),   # second  (optional, defaults to 0)
+    (0, 59),   # minute
+    (0, 23),   # hour
+    (1, 31),   # day
+    (1, 12),   # month
+    (0, 7),    # weekday (0/7 = Sunday)
+]
 
 
 def _parse_field(field: str, lo: int, hi: int) -> set[int]:
@@ -45,34 +52,40 @@ def _parse_field(field: str, lo: int, hi: int) -> set[int]:
 
 
 def _cron_matches(cron: str, dt: datetime) -> bool:
-    """Check whether a datetime satisfies a cron expression."""
+    """Check whether a datetime satisfies a 5 or 6-field cron expression."""
     fields = cron.strip().split()
-    if len(fields) != 5:
+    n = len(fields)
+    if n not in (5, 6):
         return False
-    targets = [
-        dt.minute, dt.hour, dt.day, dt.month,
-        dt.isoweekday() % 7,  # ISO weekday 1-7 → 0-6
-    ]
+    has_sec = n == 6
+    targets = [dt.minute, dt.hour, dt.day, dt.month, dt.isoweekday() % 7]
+    if has_sec:
+        targets.insert(0, dt.second)
     for i, (field, target) in enumerate(zip(fields, targets)):
-        valid = _parse_field(field, *_FIELD_RANGES[i])
+        valid = _parse_field(field, *_FIELD_RANGES[i + (0 if has_sec else 1)])
         if target not in valid:
             return False
     return True
 
 
 def _next_cron(cron: str, after: float) -> float | None:
-    """Walk forward minute by minute to find the next matching timestamp."""
+    """Walk forward to find the next matching timestamp.
+    Uses second-step for 6-field cron, minute-step for 5-field."""
     fields = cron.strip().split()
-    if len(fields) != 5:
+    n = len(fields)
+    if n not in (5, 6):
         return None
-    dt = datetime.fromtimestamp(after) + timedelta(minutes=1)
-    dt = dt.replace(second=0, microsecond=0)
-    # Walk forward at most 2 years to avoid infinite loop
+    has_sec = n == 6
+    step = timedelta(seconds=1) if has_sec else timedelta(minutes=1)
+    dt = datetime.fromtimestamp(after) + step
+    dt = dt.replace(microsecond=0)
+    if not has_sec:
+        dt = dt.replace(second=0)
     deadline = dt + timedelta(days=730)
     while dt <= deadline:
         if _cron_matches(cron, dt):
             return dt.timestamp()
-        dt += timedelta(minutes=1)
+        dt += step
     return None
 
 
@@ -81,7 +94,7 @@ def _next_cron(cron: str, after: float) -> float | None:
 @dataclass
 class CronJob:
     id: str
-    cron: str               # "0 9 * * *" five-field cron
+    cron: str               # "[sec] min hour day month weekday" — 5 or 6 field cron
     prompt: str             # injected as user message when triggered
     recurring: bool = True  # False = one-shot, auto-disables after fire
     durable: bool = True    # False = memory only, lost on restart
@@ -213,8 +226,8 @@ def add_schedule(
         return "Error: prompt is required"
     cron = cron.strip()
     fields = cron.split()
-    if len(fields) != 5:
-        return f"Error: cron must be 5 fields (got {len(fields)}): minute hour day month weekday"
+    if len(fields) not in (5, 6):
+        return f"Error: cron must be 5 or 6 fields (got {len(fields)}): [sec] minute hour day month weekday"
 
     job_id = id.strip() if id.strip() else "sched_" + hashlib.md5(f"{cron}{prompt}{time.time()}".encode()).hexdigest()[:8]
     now = time.time()

@@ -54,7 +54,7 @@ def permission_hook(block):
 
 def log_hook(block):
     """PreToolUse: log every tool call."""
-    args_preview = str(list(block.input.values())[:2])[:60]
+    args_preview = str(list(block.input.values()))[:120]
     print(f"\033[90m[HOOK] {block.name}({args_preview})\033[0m")
     return None
 

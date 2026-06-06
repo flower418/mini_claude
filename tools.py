@@ -142,7 +142,7 @@ TOOLS = [
          ["subject"]),
     TOOL("list_background", "List status of background tasks: running, completed (pending collection).",
          {}, []),
-    TOOL("schedule_task", "Schedule a CronJob (five-field cron: minute hour day month weekday). Set recurring=false for one-shot, durable=false for memory-only (lost on restart).",
+    TOOL("schedule_task", "Schedule a CronJob. cron format: [sec] minute hour day month weekday. Use 6 fields for sub-minute intervals (e.g. '*/15 * * * * *' = every 15s). 5 fields defaults sec=0. Set recurring=false for one-shot, durable=false for memory-only.",
          {"id": {"type": "string"},
           "cron": {"type": "string"},
           "prompt": {"type": "string"},
