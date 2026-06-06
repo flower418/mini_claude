@@ -112,6 +112,11 @@ def get_memory_index() -> str:
     return MEMORY_INDEX.read_text()
 
 
+def has_entries() -> bool:
+    """Check if memory has any non-empty entries."""
+    return len(_list_entries()) > 0
+
+
 # ── Search ──────────────────────────────────────────────
 
 def search_memory(query: str) -> str:

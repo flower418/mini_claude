@@ -15,7 +15,7 @@ import memory
 memory.init_memory()
 
 from config import MODEL, client, extract_text
-from skills import SYSTEM
+from skills import get_system_prompt
 import tools
 from compact import preprocess_pipeline, estimate_size, compact_history, emergency_compact, CONTEXT_LIMIT
 from hooks import trigger_hooks, init_hooks
@@ -35,8 +35,8 @@ def agent_loop(messages: list):
 
         # ── Memory reminder ──────────────────────────────
         if tools.rounds_since_memory >= 2 and messages:
-            index = memory.get_memory_index()
-            if "(empty)" not in index:
+            if memory.has_entries():
+                index = memory.get_memory_index()
                 messages.append({"role": "user",
                                  "content": f"<reminder>Check memory before proceeding:\n{index}\nUse memory_search if relevant.</reminder>"})
                 tools.rounds_since_memory = 0
@@ -50,7 +50,7 @@ def agent_loop(messages: list):
 
         try:
             response = client.messages.create(
-                model=MODEL, system=SYSTEM, messages=messages,
+                model=MODEL, system=get_system_prompt(), messages=messages,
                 tools=tools.TOOLS, max_tokens=8000,
             )
         except Exception as e:
@@ -58,7 +58,7 @@ def agent_loop(messages: list):
             if "prompt" in err and ("too long" in err or "too large" in err or "exceed" in err):
                 messages[:] = emergency_compact(messages)
                 response = client.messages.create(
-                    model=MODEL, system=SYSTEM, messages=messages,
+                    model=MODEL, system=get_system_prompt(), messages=messages,
                     tools=tools.TOOLS, max_tokens=8000,
                 )
             else:

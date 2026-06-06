@@ -1,4 +1,5 @@
 # ── Skill registry & system prompt ─────────────────────
+import hashlib
 import yaml
 
 from config import SKILLS_DIR, REPO_DIR
@@ -55,24 +56,77 @@ SUB_SYSTEM = (
 )
 
 
-def build_system() -> str:
-    """Build SYSTEM prompt with skill catalog and memory index."""
-    from memory import get_memory_index
+# ── System prompt (cached, composable) ─────────────────
 
-    catalog = list_skills()
-    memory_index = get_memory_index()
+_system_cache: dict[str, str] = {}
+
+
+def _build_identity() -> str:
     return (
-        f"You are a coding agent at {REPO_DIR}.\n\n"
-        f"## Memory (check first!)\n{memory_index}\n"
-        f"IMPORTANT: Before EVERY user request, call memory_search to check "
-        f"for relevant preferences, feedback, or project context. "
-        f"Do this even if memory seems empty — it may have been updated.\n\n"
-        f"## Skills\n{catalog}\n"
-        f"Use load_skill to get full details when needed."
+        "You are a coding agent. You help users with software engineering tasks "
+        "by reading, writing, and editing code, running shell commands, and searching files. "
+        "Always follow existing code conventions and security best practices."
     )
 
 
-SYSTEM = build_system()
+def _build_workspace() -> str:
+    return f"Working directory: {REPO_DIR}"
+
+
+def _build_tools() -> str:
+    import tools
+    tool_names = ", ".join(t["name"] for t in tools.TOOLS)
+    catalog = list_skills()
+    return (
+        f"Available tools: {tool_names}\n\n"
+        f"## Skills\n{catalog}\n"
+        f"Use load_skill(name) to get full skill details when needed.\n"
+        f"Call memory_search(query) BEFORE responding to check for user preferences."
+    )
+
+
+def _build_memory() -> str:
+    from memory import get_memory_index
+    index = get_memory_index()
+    return (
+        f"{index}\n"
+        f"IMPORTANT: Before every user request, call memory_search to check "
+        f"for relevant preferences, feedback, or project context."
+    )
+
+
+def get_system_prompt() -> str:
+    """Build system prompt from cached sections. Only rebuilds when inputs change."""
+    from memory import get_memory_index, has_entries
+    import tools
+
+    memory_index = get_memory_index()
+    has_memory = has_entries()
+
+    cache_key_parts = [
+        str(REPO_DIR),
+        str(len(tools.TOOLS)),
+        str(sorted(t["name"] for t in tools.TOOLS)),
+        hashlib.md5(memory_index.encode()).hexdigest() if has_memory else "no-memory",
+    ]
+    cache_key = "|".join(cache_key_parts)
+
+    if _system_cache.get("key") == cache_key:
+        return _system_cache["prompt"]
+
+    sections = {
+        "identity":  _build_identity(),
+        "workspace": _build_workspace(),
+        "tools":     _build_tools(),
+    }
+    if has_memory:
+        sections["memory"] = _build_memory()
+
+    prompt = "\n\n".join(f"## {k}\n{v}" for k, v in sections.items())
+
+    _system_cache["key"] = cache_key
+    _system_cache["prompt"] = prompt
+    return prompt
 
 
 def load_skill(name: str) -> str:
