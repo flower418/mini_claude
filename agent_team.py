@@ -25,12 +25,22 @@ class AgentConfig:
 # ── Mailbox ──────────────────────────────────────────────
 
 class Mailbox:
-    """Thread-safe JSONL inbox. read_all() returns messages then truncates."""
+    """Thread-safe JSONL inbox with cursor-based reads (no message loss)."""
 
     def __init__(self, agent_name: str):
         self._path = AGENTS_DIR / agent_name / "inbox.jsonl"
+        self._cursor_path = AGENTS_DIR / agent_name / "inbox.cursor"
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+
+    def _read_cursor(self) -> int:
+        try:
+            return int(self._cursor_path.read_text().strip() or "0")
+        except (FileNotFoundError, ValueError):
+            return 0
+
+    def _write_cursor(self, pos: int):
+        self._cursor_path.write_text(str(pos))
 
     def send(self, from_agent: str, body: str):
         msg = json.dumps({
@@ -43,20 +53,36 @@ class Mailbox:
                 f.write(msg + "\n")
 
     def read_all(self) -> list[dict]:
-        """Read all messages, then truncate the file. Returns list of {from, body, timestamp}."""
+        """Read new messages since last read. Advances cursor. No truncation."""
         with self._lock:
             if not self._path.exists():
                 return []
-            text = self._path.read_text().strip()
-            if not text:
+            lines = [line for line in self._path.read_text().splitlines() if line.strip()]
+            cursor = self._read_cursor()
+            new_lines = lines[cursor:]
+            if new_lines:
+                self._write_cursor(cursor + len(new_lines))
+            return [json.loads(line) for line in new_lines]
+
+    def peek(self) -> list[dict]:
+        """Read all messages without advancing cursor. For check_agent_mail tool."""
+        with self._lock:
+            if not self._path.exists():
                 return []
-            messages = [json.loads(line) for line in text.splitlines() if line.strip()]
-            self._path.write_text("")
-            return messages
+            lines = [line for line in self._path.read_text().splitlines() if line.strip()]
+            cursor = self._read_cursor()
+            all_msgs = [json.loads(line) for line in lines]
+            # Tag messages as read/unread
+            for i, m in enumerate(all_msgs):
+                m["_read"] = i < cursor
+            return all_msgs
 
     def has_mail(self) -> bool:
         with self._lock:
-            return self._path.exists() and bool(self._path.read_text().strip())
+            if not self._path.exists():
+                return False
+            total = len([l for l in self._path.read_text().splitlines() if l.strip()])
+            return total > self._read_cursor()
 
 
 # ── Agent thread ─────────────────────────────────────────
@@ -167,14 +193,15 @@ def send_to_agent(agent_name: str, message: str) -> str:
 
 
 def check_agent_mail(agent_name: str = "") -> str:
-    """Read an agent's inbox. If no name given, reads current agent's inbox (thread-local)."""
+    """Peek at an agent's inbox without consuming. Shows read/unread status."""
     name = agent_name.strip().lower() if agent_name else _whoami()
-    msgs = Mailbox(name).read_all()
+    msgs = Mailbox(name).peek()
     if not msgs:
         return "(no mail)"
     lines = []
     for m in msgs:
-        lines.append(f"[{m['from']}]: {m['body']}")
+        tag = "" if m.get("_read") else " \033[33m[new]\033[0m"
+        lines.append(f"[{m['from']}]{tag}: {m['body']}")
     return "\n\n".join(lines)
 
 
