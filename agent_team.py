@@ -193,38 +193,36 @@ def _agent_loop(name: str, role: str, system_prompt: str):
             time.sleep(0.5)
             continue
 
-        # ── Handle protocol messages first ────────────
-        # Shutdown request → auto-accept + cleanup + exit
-        shutdown_req = None
-        for m in msgs:
-            if m.get("type") == TYPE_SHUTDOWN:
-                shutdown_req = m
-                break
-        if shutdown_req:
-            _send_response(shutdown_req["request_id"], accept=True, reason="shutting down")
-            _remove_agent(name)
-            print(f"\033[90m[team:{name}] Shutdown accepted, exiting\033[0m")
-            return
-
-        # Plan response (lead's decision on our plan)
+        # ── Classify incoming messages ────────────────
+        shutdown_msgs = [m for m in msgs if m.get("type") == TYPE_SHUTDOWN]
         plan_responses = [m for m in msgs if m.get("type") in (TYPE_ACCEPT, TYPE_REJECT)]
         task_msgs = [m for m in msgs if m.get("type", TYPE_TASK) == TYPE_TASK]
 
-        # ── Build conversation from task messages ─────
-        if not task_msgs:
+        # Nothing actionable
+        if not shutdown_msgs and not task_msgs:
             continue
 
-        # Include plan responses as context
+        # ── Build conversation ────────────────────────
         context_parts = []
         for pr in plan_responses:
             decision = "APPROVED" if pr["type"] == TYPE_ACCEPT else "REJECTED"
             context_parts.append(f"[SYSTEM: Plan {decision}] {pr['body']}")
+        for sm in shutdown_msgs:
+            context_parts.append(
+                f"[PROTOCOL: shutdown request {sm['request_id']}] "
+                f"Use respond_request to accept or reject. "
+                f"Reject if you are still working; accept if idle/done."
+            )
         for tm in task_msgs:
             context_parts.append(f"[{tm['from']} @ {tm['timestamp'][:19]}]: {tm['body']}")
+
+        if not context_parts:
+            continue
         combined = "\n\n".join(context_parts)
         messages = [{"role": "user", "content": combined}]
 
-        # ── Tool-calling loop (max 12 turns for plan+execute) ──
+        # ── Tool-calling loop ─────────────────────────
+        accepted_shutdown = None
         for _ in range(12):
             try:
                 response = client.messages.create(
@@ -250,16 +248,27 @@ def _agent_loop(name: str, role: str, system_prompt: str):
                     output = safe_dispatch(handler, block.input) if handler else f"Unknown tool: {block.name}"
                     results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
                     print(f"  \033[90m[team:{name}] {block.name}: {output[:100]}\033[0m")
+                    # Track if shutdown was accepted
+                    if block.name == "respond_request":
+                        inp = block.input
+                        if inp.get("accept") and inp.get("request_id") in [sm["request_id"] for sm in shutdown_msgs]:
+                            accepted_shutdown = inp["request_id"]
             messages.append({"role": "user", "content": results})
 
-        # ── Extract and send result ───────────────────
+        # ── Handle shutdown acceptance ────────────────
+        if accepted_shutdown:
+            _remove_agent(name)
+            print(f"\033[90m[team:{name}] Shutdown {accepted_shutdown} accepted, exiting\033[0m")
+            return
+
+        # ── Send task result to lead ──────────────────
         result = ""
         for msg in reversed(messages):
             if msg.get("role") == "assistant":
                 result = extract_text(msg["content"])
                 if result:
                     break
-        if result:
+        if result and not shutdown_msgs:  # don't send result for shutdown-only interactions
             lead_mail.send(name, result)
             print(f"\033[90m[team:{name}] → lead ({len(result)} chars)\033[0m")
 
