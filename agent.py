@@ -262,6 +262,18 @@ if __name__ == "__main__":
                                 "content": f"<background-result task_id=\"{task_id}\">\n{result}\n</background-result>"})
             print()
 
+        # ── Collect orphaned team mail ───────────────────
+        orphan_mail = agent_team.Mailbox("lead").read_all()
+        if orphan_mail:
+            print(f"\033[33m[team] Orphaned mail (arrived after loop ended):\033[0m")
+            for m in orphan_mail:
+                print(f"  \033[90m── {m['from']} ──\033[0m\n{m['body'][:500]}")
+                if len(m['body']) > 500:
+                    print(f"  \033[90m... ({len(m['body'])} chars total)\033[0m")
+                history.append({"role": "user",
+                                "content": f"<agent-mail from=\"{m['from']}\">\n{m['body']}\n</agent-mail>"})
+            print()
+
         last = history[-1]["content"]
         if isinstance(last, list):
             for block in last:

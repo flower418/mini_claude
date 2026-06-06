@@ -112,7 +112,13 @@ def _agent_loop(name: str, role: str, system_prompt: str):
                     print(f"  \033[90m[team:{name}] {block.name}: {output[:100]}\033[0m")
             messages.append({"role": "user", "content": results})
 
-        result = extract_text(messages[-1]["content"])
+        # Extract result: scan backward for the last assistant message with text
+        result = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant":
+                result = extract_text(msg["content"])
+                if result:
+                    break
         if result:
             lead_mail.send(name, result)
             print(f"\033[90m[team:{name}] → lead ({len(result)} chars)\033[0m")
