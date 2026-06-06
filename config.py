@@ -40,6 +40,7 @@ client = Anthropic(
     base_url=CONFIG.get("ANTHROPIC_BASE_URL"),
 )
 MODEL = CONFIG["MODEL_ID"]
+MODEL_FALLBACK = CONFIG.get("MODEL_FALLBACK_ID")  # optional lighter model for 529 fallback
 
 
 def safe_path(p: str) -> Path:

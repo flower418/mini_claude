@@ -1,5 +1,6 @@
 # ── Agent entry point & main loop ───────────────────────
 import json
+import time
 
 try:
     import readline
@@ -14,13 +15,27 @@ import memory
 
 memory.init_memory()
 
-from config import MODEL, client, extract_text
+from config import MODEL, MODEL_FALLBACK, client, extract_text
 from skills import get_system_prompt
 import tools
 from compact import preprocess_pipeline, estimate_size, compact_history, emergency_compact, CONTEXT_LIMIT
 from hooks import trigger_hooks, init_hooks
 
 init_hooks()
+
+
+def _is_retriable(e: Exception) -> bool:
+    """Check if error is transient: network issues, rate limits, server 5xx."""
+    err = str(e).lower()
+    if any(kw in err for kw in ("connection", "timeout", "reset", "refused", "broken pipe")):
+        return True
+    if hasattr(e, "status_code"):
+        code = e.status_code
+        if code == 429 or (500 <= code < 600):
+            return True
+    if any(kw in err for kw in ("rate limit", "server error", "overloaded", "internal error")):
+        return True
+    return False
 
 
 def agent_loop(messages: list):
@@ -48,21 +63,64 @@ def agent_loop(messages: list):
             print(f"\033[33m[compact] Context over limit, running LLM compaction...\033[0m")
             messages[:] = compact_history(messages)
 
-        try:
-            response = client.messages.create(
-                model=MODEL, system=get_system_prompt(), messages=messages,
-                tools=tools.TOOLS, max_tokens=8000,
-            )
-        except Exception as e:
-            err = str(e).lower()
-            if "prompt" in err and ("too long" in err or "too large" in err or "exceed" in err):
-                messages[:] = emergency_compact(messages)
-                response = client.messages.create(
-                    model=MODEL, system=get_system_prompt(), messages=messages,
-                    tools=tools.TOOLS, max_tokens=8000,
-                )
-            else:
-                raise
+        # ── API call with 3-tier retry logic ─────────────
+        max_tokens = 8000
+        max_tokens_retries = 0
+        current_model = MODEL
+
+        while True:  # max_tokens expansion loop
+            server_retries = 0
+            prompt_compacted = False
+
+            while True:  # server retry loop
+                try:
+                    response = client.messages.create(
+                        model=current_model, system=get_system_prompt(), messages=messages,
+                        tools=tools.TOOLS, max_tokens=max_tokens,
+                    )
+                    break
+                except Exception as e:
+                    err = str(e).lower()
+                    # Category 2: prompt too long → emergency compact → retry once
+                    if "prompt" in err and ("too long" in err or "too large" in err or "exceed" in err):
+                        if prompt_compacted:
+                            print("\033[31m[error] Prompt still too long after emergency compact\033[0m")
+                            raise
+                        messages[:] = emergency_compact(messages)
+                        if estimate_size(json.dumps(messages, default=str)) > CONTEXT_LIMIT * 2:
+                            print("\033[31m[error] Prompt too large even for emergency compact\033[0m")
+                            raise
+                        prompt_compacted = True
+                        continue
+                    # Category 4: 529 overloaded → fallback to lighter model
+                    if hasattr(e, "status_code") and e.status_code == 529:
+                        if MODEL_FALLBACK and current_model != MODEL_FALLBACK:
+                            print(f"\033[33m[retry] Server overloaded (529), switching from {current_model} to {MODEL_FALLBACK}\033[0m")
+                            current_model = MODEL_FALLBACK
+                            continue
+                        # no fallback configured, or already on fallback → treat as regular server error
+                    # Category 3: server/network issues → exponential backoff
+                    if _is_retriable(e):
+                        if server_retries >= 10:
+                            print(f"\033[31m[error] Server retries exhausted ({server_retries} attempts)\033[0m")
+                            raise
+                        wait = 0.5 * (2 ** server_retries)
+                        print(f"\033[33m[retry] Server error in {wait:.1f}s (attempt {server_retries + 1}/10): {str(e)[:80]}\033[0m")
+                        time.sleep(wait)
+                        server_retries += 1
+                        continue
+                    raise
+
+            # Category 1: output truncated by max_tokens → expand 4x, retry up to 3
+            if response.stop_reason == "max_tokens":
+                if max_tokens_retries < 3:
+                    max_tokens *= 4
+                    max_tokens_retries += 1
+                    print(f"\033[33m[retry] Output truncated, expanding max_tokens to {max_tokens} (attempt {max_tokens_retries}/3)\033[0m")
+                    continue
+                else:
+                    print(f"\033[33m[warn] Output still truncated after {max_tokens_retries} expansions, proceeding with partial response\033[0m")
+            break  # success (or gave up on truncation)
 
         messages.append({"role": "assistant", "content": response.content})
 
