@@ -12,6 +12,7 @@ from config import AGENTS_DIR, MODEL, client
 LEAD_NAME = "lead"
 _agent_threads: dict[str, threading.Thread] = {}
 _agent_configs: dict[str, "AgentConfig"] = {}
+_current = threading.local()  # thread-local: tracks which agent is executing
 
 
 @dataclass
@@ -62,6 +63,8 @@ class Mailbox:
 
 def _agent_loop(name: str, role: str, system_prompt: str):
     """Sub-agent thread: poll inbox → process with LLM+tools → send result to lead."""
+    _current.name = name  # thread-local so tools know who's calling
+
     # Lazy imports to avoid circular dependency with tools.py
     from tools import SUB_TOOLS, SUB_HANDLERS, safe_dispatch
     from config import extract_text
@@ -140,19 +143,26 @@ def spawn_agent(name: str, role: str, system_prompt: str = "") -> str:
     return f"Spawned agent '{name}' ({role}). Use send_to_agent to give it work."
 
 
+def _whoami() -> str:
+    """Return the current agent's name (thread-local), defaulting to 'lead'."""
+    return getattr(_current, "name", LEAD_NAME)
+
+
 def send_to_agent(agent_name: str, message: str) -> str:
-    """Send a message to a sub-agent's inbox."""
+    """Send a message to an agent's inbox. Sender is auto-detected from thread context."""
     agent_name = agent_name.strip().lower()
-    if agent_name not in _agent_threads:
-        return f"Error: agent '{agent_name}' not found. Use spawn_agent first."
-    Mailbox(agent_name).send(LEAD_NAME, message)
-    print(f"\033[90m[team] lead → {agent_name}: {message[:60]}\033[0m")
+    if agent_name not in _agent_threads and agent_name != LEAD_NAME:
+        return f"Error: agent '{agent_name}' not found."
+    sender = _whoami()
+    Mailbox(agent_name).send(sender, message)
+    print(f"\033[90m[team] {sender} → {agent_name}: {message[:60]}\033[0m")
     return f"Sent to '{agent_name}'."
 
 
-def check_lead_mail() -> str:
-    """Read lead's inbox. Called by tool or auto-injected before API calls."""
-    msgs = Mailbox(LEAD_NAME).read_all()
+def check_agent_mail(agent_name: str = "") -> str:
+    """Read an agent's inbox. If no name given, reads current agent's inbox (thread-local)."""
+    name = agent_name.strip().lower() if agent_name else _whoami()
+    msgs = Mailbox(name).read_all()
     if not msgs:
         return "(no mail)"
     lines = []

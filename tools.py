@@ -14,7 +14,7 @@ from task_system import run_create_task, run_claim_task, run_complete_task, run_
 import background
 from background import should_background
 import scheduler
-from agent_team import spawn_agent, send_to_agent, check_lead_mail, list_agents
+from agent_team import spawn_agent, send_to_agent, check_agent_mail, list_agents
 
 CURRENT_TODOS: list[dict] = []
 rounds_since_todo = 0
@@ -162,8 +162,8 @@ TOOLS = [
     TOOL("send_to_agent", "Send a message/task to a sub-agent. It will process asynchronously and reply to your inbox.",
          {"agent_name": {"type": "string"},
           "message": {"type": "string"}}),
-    TOOL("check_agent_mail", "Check your (lead) inbox for replies from sub-agents.",
-         {}, []),
+    TOOL("check_agent_mail", "Check an agent's inbox (defaults to yours). Sub-agents can also use this.",
+         {"agent_name": {"type": "string"}}, []),
     TOOL("list_agents", "List all spawned sub-agents and their status.",
          {}, []),
 ]
@@ -185,6 +185,10 @@ SUB_TOOLS = [
         "new_text": {"type": "string"},
     }),
     TOOL("glob", "Find files matching a glob pattern.", {"pattern": {"type": "string"}}),
+    TOOL("send_to_agent", "Send a message to another agent's inbox.",
+         {"agent_name": {"type": "string"}, "message": {"type": "string"}}),
+    TOOL("check_agent_mail", "Check your own inbox for new messages.",
+         {}, []),
 ]
 
 
@@ -368,8 +372,8 @@ def run_send_to_agent(agent_name: str, message: str) -> str:
     return send_to_agent(agent_name, message)
 
 
-def run_check_agent_mail() -> str:
-    return check_lead_mail()
+def run_check_agent_mail(agent_name: str = "") -> str:
+    return check_agent_mail(agent_name)
 
 
 def run_list_agents() -> str:
@@ -396,4 +400,5 @@ TOOL_HANDLERS = {
 SUB_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob,
+    "send_to_agent": run_send_to_agent, "check_agent_mail": run_check_agent_mail,
 }
