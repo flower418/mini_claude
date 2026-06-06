@@ -1,11 +1,24 @@
 # ── Environment & configuration ────────────────────────
 import os
+import threading
 from pathlib import Path
 
 from anthropic import Anthropic
 from dotenv import dotenv_values
 
 REPO_DIR = Path(__file__).resolve().parent
+
+_workdir = threading.local()
+
+
+def get_workdir() -> Path:
+    """Return the current agent's working directory (thread-local), defaults to REPO_DIR."""
+    return getattr(_workdir, "path", REPO_DIR)
+
+
+def set_workdir(path: Path):
+    """Set thread-local working directory for isolation (worktrees)."""
+    _workdir.path = path
 SKILLS_DIR = REPO_DIR / "skills"
 ENV_FILE = REPO_DIR / ".env"
 TOOL_RESULTS_DIR = REPO_DIR / ".task_outputs" / "tool-results"
@@ -47,9 +60,10 @@ MODEL_FALLBACK = CONFIG.get("MODEL_FALLBACK_ID")  # optional lighter model for 5
 
 
 def safe_path(p: str) -> Path:
-    """Resolve and sandbox a path within REPO_DIR."""
-    path = (REPO_DIR / p).resolve()
-    if not path.is_relative_to(REPO_DIR):
+    """Resolve and sandbox a path within the current workdir."""
+    base = get_workdir()
+    path = (base / p).resolve()
+    if not path.is_relative_to(base):
         raise ValueError(f"Path escapes workspace: {p}")
     return path
 

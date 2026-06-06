@@ -5,7 +5,7 @@ import inspect
 import json
 import subprocess
 
-from config import REPO_DIR, DENY_LIST, safe_path, MODEL, client, extract_text
+from config import REPO_DIR, DENY_LIST, safe_path, MODEL, client, extract_text, get_workdir
 from skills import SUB_SYSTEM, load_skill
 from hooks import trigger_hooks
 from compact import run_compact
@@ -18,6 +18,7 @@ from agent_team import (
     spawn_agent, send_to_agent, check_agent_mail, list_agents, kill_agent,
     request_shutdown, request_plan, respond_request, approve_request, reject_request,
 )
+import worktree
 
 CURRENT_TODOS: list[dict] = []
 rounds_since_todo = 0
@@ -186,6 +187,12 @@ TOOLS = [
           "accept": {"type": "boolean"},
           "reason": {"type": "string"}},
          ["request_id", "accept"]),
+    TOOL("list_worktrees", "List all worktrees (isolated task directories) with status.",
+         {}, []),
+    TOOL("merge_worktree", "Merge a worktree's changes back to main repo. Detects conflicts.",
+         {"task_id": {"type": "string"}}),
+    TOOL("discard_worktree", "Delete a worktree without merging.",
+         {"task_id": {"type": "string"}}),
 ]
 
 SUB_TOOLS = [
@@ -235,7 +242,7 @@ def run_bash(command: str) -> str:
         return "Error: Dangerous command blocked"
     try:
         r = subprocess.run(
-            command, shell=True, cwd=str(REPO_DIR),
+            command, shell=True, cwd=str(get_workdir()),
             capture_output=True, text=True, timeout=120,
         )
         out = (r.stdout + r.stderr).strip()
@@ -288,8 +295,8 @@ def run_glob(pattern: str) -> str:
     try:
         recursive = "**" in pattern
         results = []
-        for match in glob_module.glob(pattern, root_dir=REPO_DIR, recursive=recursive):
-            if (REPO_DIR / match).resolve().is_relative_to(REPO_DIR):
+        for match in glob_module.glob(pattern, root_dir=get_workdir(), recursive=recursive):
+            if (get_workdir() / match).resolve().is_relative_to(get_workdir()):
                 results.append(match)
         return "\n".join(results) if results else "(no matches)"
     except Exception as e:
@@ -440,6 +447,18 @@ def run_respond_request(request_id: str, accept: bool, reason: str = "") -> str:
     return respond_request(request_id, accept, reason)
 
 
+def run_list_worktrees() -> str:
+    return worktree.list_worktrees()
+
+
+def run_merge_worktree(task_id: str) -> str:
+    return worktree.merge(task_id)
+
+
+def run_discard_worktree(task_id: str) -> str:
+    return worktree.discard(task_id)
+
+
 TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob, "todo_write": run_todo_write,
@@ -458,6 +477,8 @@ TOOL_HANDLERS = {
     "kill_agent": run_kill_agent, "request_shutdown": run_request_shutdown,
     "approve_request": run_approve_request, "reject_request": run_reject_request,
     "request_plan": run_request_plan, "respond_request": run_respond_request,
+    "list_worktrees": run_list_worktrees, "merge_worktree": run_merge_worktree,
+    "discard_worktree": run_discard_worktree,
 }
 
 SUB_HANDLERS = {

@@ -180,9 +180,13 @@ def _try_auto_claim(agent_name: str) -> dict | None:
             continue
         result = run_claim_task(t["id"], agent_name)
         if "Claimed" in result:
+            # Create isolated worktree
+            import worktree
+            from config import set_workdir
+            wt_path = worktree.create(t["id"])
+            set_workdir(wt_path)
             print(f"\033[90m  [{agent_name}] auto-claimed: {t['subject']}\033[0m")
             return t
-        # else: someone else claimed it first, try next
     return None
 
 
@@ -315,6 +319,8 @@ def _agent_loop(name: str, role: str, system_prompt: str):
         # ── Complete auto-claimed task ──────────────────
         if claimed_task_id:
             from task_system import run_complete_task
+            import worktree
+            worktree.merge(claimed_task_id)
             run_complete_task(claimed_task_id)
             print(f"\033[90m  [{name}] completed: {claimed_task_id}\033[0m")
 
