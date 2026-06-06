@@ -85,6 +85,18 @@ class Mailbox:
             return total > self._read_cursor()
 
 
+# ── Lifecycle ────────────────────────────────────────────
+
+def cleanup_stale():
+    """Remove .agents/ dirs from previous sessions (called once at startup)."""
+    import shutil
+    if AGENTS_DIR.exists():
+        for d in AGENTS_DIR.iterdir():
+            if d.is_dir():
+                shutil.rmtree(d)
+        print(f"\033[90m[team] Cleaned stale agent dirs\033[0m")
+
+
 # ── Agent thread ─────────────────────────────────────────
 
 def _agent_loop(name: str, role: str, system_prompt: str):

@@ -23,6 +23,7 @@ import tools
 import background
 import scheduler
 import agent_team
+agent_team.cleanup_stale()
 from compact import preprocess_pipeline, estimate_size, compact_history, emergency_compact, CONTEXT_LIMIT
 from hooks import trigger_hooks, init_hooks
 

@@ -82,7 +82,8 @@ def _build_tools() -> str:
         f"## Skills\n{catalog}\n"
         f"Use load_skill(name) to get full skill details when needed.\n"
         f"Call memory_search(query) BEFORE responding to check for user preferences.\n"
-        f"Agent team: you are 'lead'. Sub-agents reply to 'lead', not 'default'."
+        f"Agent team: you are 'lead'. Sub-agents reply to 'lead', not 'default'.\n"
+        f"When all sub-agent work is done, call kill_agent for each spawned agent to clean up .agents/."
     )
 
 
