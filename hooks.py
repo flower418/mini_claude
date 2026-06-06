@@ -53,9 +53,8 @@ def permission_hook(block):
 
 
 def log_hook(block):
-    """PreToolUse: log every tool call."""
-    args_preview = str(list(block.input.values()))[:120]
-    print(f"\033[90m[HOOK] {block.name}({args_preview})\033[0m")
+    """PreToolUse: log tool name only (compact)."""
+    print(f"\033[90m[{block.name}]\033[0m", end="", flush=True)
     return None
 
 
@@ -74,14 +73,6 @@ def context_inject_hook(query: str):
 
 def summary_hook(messages: list):
     """Stop: count total tool calls in session."""
-    tool_count = 0
-    for m in messages:
-        content = m.get("content")
-        if isinstance(content, list):
-            for b in content:
-                if isinstance(b, dict) and b.get("type") == "tool_result":
-                    tool_count += 1
-    print(f"\033[90m[HOOK] Stop: session used {tool_count} tool calls\033[0m")
     return None
 
 

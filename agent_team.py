@@ -139,7 +139,6 @@ def _send_envelope(to_agent: str, body: str, msg_type: str = TYPE_TASK, request_
                 "status": "pending", "timestamp": time.time(),
             }
     type_label = f"[{msg_type}]" if msg_type != TYPE_TASK else ""
-    print(f"\033[90m[team] {sender} → {to_agent}: {type_label}\033[0m")
     return f"Sent {type_label} to '{to_agent}'" + (f" (req: {request_id})" if request_id else "")
 
 
@@ -249,8 +248,6 @@ def _agent_loop(name: str, role: str, system_prompt: str):
                     handler = SUB_HANDLERS.get(block.name)
                     output = safe_dispatch(handler, block.input) if handler else f"Unknown tool: {block.name}"
                     results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
-                    if block.name not in ("check_agent_mail", "send_to_agent"):
-                        print(f"  \033[90m[{name}] {block.name}\033[0m")
                     # Track if shutdown was accepted
                     if block.name == "respond_request":
                         inp = block.input
@@ -294,7 +291,6 @@ def spawn_agent(name: str, role: str, system_prompt: str = "") -> str:
     t = threading.Thread(target=_agent_loop, args=(name, role, system_prompt), daemon=True)
     t.start()
     _agent_threads[name] = t
-    print(f"\033[90m[team] Spawned: {name} ({role})\033[0m")
     return f"Spawned agent '{name}' ({role}). Use send_to_agent to give it work."
 
 
@@ -361,5 +357,4 @@ def kill_agent(name: str) -> str:
     if name not in _agent_configs:
         return f"Error: agent '{name}' not found"
     _remove_agent(name)
-    print(f"\033[90m[team] Killed: {name}\033[0m")
     return f"Killed agent '{name}' and cleaned up .agents/{name}/"

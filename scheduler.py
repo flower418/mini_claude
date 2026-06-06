@@ -196,7 +196,7 @@ def start():
         if not job.next_run:
             job.next_run = _next_cron(job.cron, now)
             _save_durable(job)
-    print(f"\033[90m[sched] Started ({len(_all_jobs())} jobs loaded)\033[0m")
+    print(f"\033[90m[sched] {len(_all_jobs())} jobs loaded\033[0m")
 
 
 # ── Layer 3: Queue interface ────────────────────────────

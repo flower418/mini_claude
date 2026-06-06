@@ -92,7 +92,6 @@ def submit(prompt: str) -> str:
     future = _executor.submit(_run_background_task, task_id, prompt)
     with _lock:
         _futures[task_id] = future
-    print(f"\033[90m[bg] Submitted: {task_id}\033[0m")
     return task_id
 
 

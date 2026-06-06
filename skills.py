@@ -114,7 +114,6 @@ def get_system_prompt() -> str:
     cache_key = "|".join(cache_key_parts)
 
     if _system_cache.get("key") == cache_key:
-        print(f"\033[90m[system] cache hit ({len(_system_cache['prompt'])} chars)\033[0m")
         return _system_cache["prompt"]
 
     sections = {
@@ -129,8 +128,6 @@ def get_system_prompt() -> str:
 
     _system_cache["key"] = cache_key
     _system_cache["prompt"] = prompt
-    section_names = ", ".join(sections.keys())
-    print(f"\033[90m[system] assembled sections: {section_names} ({len(prompt)} chars)\033[0m")
     return prompt
 
 
