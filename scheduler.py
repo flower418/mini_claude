@@ -4,13 +4,17 @@
 # Layer 3: Entry point dequeues and injects when agent is idle
 # Layer 4: Agent processes the injected prompt, result goes into history
 import hashlib
-import json
 import threading
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 
 from config import SCHEDULE_DIR
+from state_store import JsonDirStore, SCHEDULE_ID_POLICY
+
+
+def _valid_schedule_id(task_id: str) -> bool:
+    return SCHEDULE_ID_POLICY.is_valid(task_id)
 
 
 # ── Cron parser (five or six-field: [sec] minute hour day month weekday) ─
@@ -35,14 +39,15 @@ def _parse_field(field: str, lo: int, hi: int) -> set[int]:
         if "/" in part:
             base, step = part.split("/")
             step = int(step)
+            if step <= 0:
+                raise ValueError("cron step must be positive")
             if base == "*":
-                base_range = range(lo, hi + 1)
+                start, end = lo, hi
             elif "-" in base:
-                a, b = map(int, base.split("-"))
-                base_range = range(a, b + 1)
+                start, end = map(int, base.split("-"))
             else:
-                base_range = range(int(base), hi + 1)
-            values.update(n for n in base_range if (n - lo) % step == 0)
+                start, end = int(base), hi
+            values.update(range(start, end + 1, step))
         elif "-" in part:
             a, b = map(int, part.split("-"))
             values.update(range(a, b + 1))
@@ -120,34 +125,26 @@ _thread: threading.Thread | None = None
 _memory_jobs: dict[str, CronJob] = {}  # non-durable jobs
 
 
+def _store() -> JsonDirStore:
+    return JsonDirStore(SCHEDULE_DIR, SCHEDULE_ID_POLICY)
+
+
 def _schedule_path(task_id: str):
-    return SCHEDULE_DIR / f"{task_id}.json"
+    return _store().path(task_id)
 
 
 # ── Persistence (durable jobs only) ──────────────────────
 
 def _load_durable() -> list[CronJob]:
-    if not SCHEDULE_DIR.exists():
-        return []
-    jobs = []
-    for f in sorted(SCHEDULE_DIR.glob("*.json")):
-        try:
-            d = json.loads(f.read_text())
-            jobs.append(CronJob.from_dict(d))
-        except (json.JSONDecodeError, TypeError):
-            continue
-    return jobs
+    return _store().list(CronJob.from_dict)
 
 
 def _save_durable(job: CronJob):
-    SCHEDULE_DIR.mkdir(parents=True, exist_ok=True)
-    _schedule_path(job.id).write_text(json.dumps(job.to_dict(), indent=2, ensure_ascii=False))
+    _store().write(job.id, job.to_dict())
 
 
 def _delete_durable(task_id: str):
-    path = _schedule_path(task_id)
-    if path.exists():
-        path.unlink()
+    _store().delete(task_id)
 
 
 def _all_jobs() -> list[CronJob]:
@@ -171,7 +168,10 @@ def _scheduler_loop():
                     _queue.append(job)
                 job.last_run = now
                 if job.recurring:
-                    job.next_run = _next_cron(job.cron, now)
+                    try:
+                        job.next_run = _next_cron(job.cron, now)
+                    except ValueError:
+                        job.next_run = None
                 else:
                     job.next_run = None  # one-shot done
                 if job.durable:
@@ -194,7 +194,10 @@ def start():
     now = time.time()
     for job in _load_durable():
         if not job.next_run:
-            job.next_run = _next_cron(job.cron, now)
+            try:
+                job.next_run = _next_cron(job.cron, now)
+            except ValueError:
+                job.next_run = None
             _save_durable(job)
     print(f"\033[90m[sched] {len(_all_jobs())} jobs loaded\033[0m")
 
@@ -229,9 +232,18 @@ def add_schedule(
     if len(fields) not in (5, 6):
         return f"Error: cron must be 5 or 6 fields (got {len(fields)}): [sec] minute hour day month weekday"
 
-    job_id = id.strip() if id.strip() else "sched_" + hashlib.md5(f"{cron}{prompt}{time.time()}".encode()).hexdigest()[:8]
+    raw_id = id.strip() if id.strip() else "sched_" + hashlib.md5(f"{cron}{prompt}{time.time()}".encode()).hexdigest()[:8]
+    try:
+        job_id = SCHEDULE_ID_POLICY.normalize(raw_id)
+    except ValueError:
+        return f"Error: invalid schedule id '{raw_id}'"
     now = time.time()
-    next_run = _next_cron(cron, now)
+    try:
+        next_run = _next_cron(cron, now)
+    except ValueError as e:
+        return f"Error: invalid cron expression: {e}"
+    if next_run is None:
+        return "Error: cron expression has no matching run time within two years"
 
     job = CronJob(
         id=job_id,
@@ -271,18 +283,22 @@ def list_schedules() -> str:
 
 def cancel_schedule(task_id: str) -> str:
     """Remove a scheduled job (both disk and memory)."""
+    try:
+        job_id = SCHEDULE_ID_POLICY.normalize(task_id)
+    except ValueError:
+        return f"Error: invalid schedule id '{task_id}'"
     found = False
     # Check durable
     for job in _load_durable():
-        if job.id == task_id:
-            _delete_durable(task_id)
+        if job.id == job_id:
+            _delete_durable(job_id)
             found = True
             break
     # Check memory
-    if task_id in _memory_jobs:
-        del _memory_jobs[task_id]
+    if job_id in _memory_jobs:
+        del _memory_jobs[job_id]
         found = True
     if not found:
-        return f"Error: schedule '{task_id}' not found"
-    print(f"\033[90m[sched] Cancelled: {task_id}\033[0m")
-    return f"Cancelled schedule '{task_id}'"
+        return f"Error: schedule '{job_id}' not found"
+    print(f"\033[90m[sched] Cancelled: {job_id}\033[0m")
+    return f"Cancelled schedule '{job_id}'"

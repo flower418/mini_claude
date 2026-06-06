@@ -1,50 +1,45 @@
 # ── Recoverable task system with dependency graph ───────
 import hashlib
-import json
-import re
 import threading
 import time
 
 from config import TASK_DIR
+from state_store import JsonDirStore, TASK_ID_POLICY, slugify_ascii
 
 _io_lock = threading.Lock()
 
 
+def _store() -> JsonDirStore:
+    return JsonDirStore(TASK_DIR, TASK_ID_POLICY)
+
+
+def _valid_task_id(task_id: str) -> bool:
+    return TASK_ID_POLICY.is_valid(task_id)
+
+
 def _task_path(task_id: str):
-    return TASK_DIR / f"{task_id}.json"
+    return _store().path(task_id)
 
 
 def _load_task(task_id: str) -> dict | None:
-    path = _task_path(task_id)
     with _io_lock:
-        if not path.exists():
-            return None
-        return json.loads(path.read_text())
+        return _store().get(task_id)
 
 
 def _save_task(task: dict):
-    TASK_DIR.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(task, indent=2, ensure_ascii=False)
     with _io_lock:
-        _task_path(task["id"]).write_text(data)
+        _store().write(task["id"], task)
 
 
 def _generate_id(subject: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", subject.lower()).strip("-")[:40]
+    slug = slugify_ascii(subject, fallback="task")
     suffix = hashlib.md5(f"{subject}{time.time()}".encode()).hexdigest()[:4]
     return f"{slug}-{suffix}"
 
 
 def _load_all_tasks() -> list[dict]:
-    if not TASK_DIR.exists():
-        return []
-    tasks = []
-    for f in sorted(TASK_DIR.glob("*.json")):
-        try:
-            tasks.append(json.loads(f.read_text()))
-        except json.JSONDecodeError:
-            continue
-    return tasks
+    with _io_lock:
+        return _store().list()
 
 
 # ── Tool handlers ───────────────────────────────────────
@@ -58,6 +53,8 @@ def run_create_task(subject: str, description: str = "", blockedBy: list[str] | 
     blockedBy = blockedBy or []
     # Validate blockedBy IDs
     for bid in blockedBy:
+        if not _valid_task_id(bid):
+            return f"Error: invalid blockedBy task id '{bid}'"
         if _load_task(bid) is None:
             return f"Error: blockedBy task '{bid}' not found"
     task_id = _generate_id(subject)
@@ -79,6 +76,8 @@ def run_create_task(subject: str, description: str = "", blockedBy: list[str] | 
 
 def run_claim_task(task_id: str, owner: str = "agent") -> str:
     """Claim a task (check dependencies first)."""
+    if not _valid_task_id(task_id):
+        return f"Error: invalid task id '{task_id}'"
     task = _load_task(task_id)
     if task is None:
         return f"Error: task '{task_id}' not found"
@@ -106,6 +105,8 @@ def run_claim_task(task_id: str, owner: str = "agent") -> str:
 
 def run_complete_task(task_id: str) -> str:
     """Mark a task as completed."""
+    if not _valid_task_id(task_id):
+        return f"Error: invalid task id '{task_id}'"
     task = _load_task(task_id)
     if task is None:
         return f"Error: task '{task_id}' not found"
@@ -155,6 +156,8 @@ def run_list_tasks(status: str | None = None) -> str:
 
 def run_get_task(task_id: str) -> str:
     """Get full details of a task, including dependents."""
+    if not _valid_task_id(task_id):
+        return f"Error: invalid task id '{task_id}'"
     task = _load_task(task_id)
     if task is None:
         return f"Error: task '{task_id}' not found"

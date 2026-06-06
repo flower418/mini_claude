@@ -1,7 +1,6 @@
 # ── Agent team: async sub-agents communicating via JSONL mailboxes ──
 # Protocol: typed messages (task/shutdown/plan/accept/reject) with request_id
 # Each request goes through request → confirm/reject cycle
-import json
 import shutil
 import threading
 import time
@@ -10,6 +9,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 
 from config import AGENTS_DIR, MODEL, client
+from state_store import AGENT_NAME_POLICY, append_jsonl, atomic_write_text, read_jsonl, write_json_file
 
 LEAD_NAME = "lead"
 _agent_threads: dict[str, threading.Thread] = {}
@@ -39,6 +39,7 @@ class Mailbox:
     """Thread-safe JSONL inbox with cursor-based reads."""
 
     def __init__(self, agent_name: str):
+        agent_name = _normalize_agent_name(agent_name)
         self._path = AGENTS_DIR / agent_name / "inbox.jsonl"
         self._cursor_path = AGENTS_DIR / agent_name / "inbox.cursor"
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,7 +52,7 @@ class Mailbox:
             return 0
 
     def _write_cursor(self, pos: int):
-        self._cursor_path.write_text(str(pos))
+        atomic_write_text(self._cursor_path, str(pos))
 
     def send(self, from_agent: str, body: str, msg_type: str = TYPE_TASK, request_id: str = ""):
         envelope = {
@@ -61,41 +62,31 @@ class Mailbox:
             "body": body,
             "timestamp": datetime.now().isoformat(),
         }
-        line = json.dumps(envelope, ensure_ascii=False)
         with self._lock:
-            with open(self._path, "a") as f:
-                f.write(line + "\n")
+            append_jsonl(self._path, envelope)
 
     def read_all(self) -> list[dict]:
         """Read new messages since last cursor advance."""
         with self._lock:
-            if not self._path.exists():
-                return []
-            lines = [l for l in self._path.read_text().splitlines() if l.strip()]
+            messages = read_jsonl(self._path)
             cursor = self._read_cursor()
-            new_lines = lines[cursor:]
-            if new_lines:
-                self._write_cursor(cursor + len(new_lines))
-            return [json.loads(l) for l in new_lines]
+            new_messages = messages[cursor:]
+            if new_messages:
+                self._write_cursor(cursor + len(new_messages))
+            return new_messages
 
     def peek(self) -> list[dict]:
         """Read all messages without advancing cursor."""
         with self._lock:
-            if not self._path.exists():
-                return []
-            lines = [l for l in self._path.read_text().splitlines() if l.strip()]
+            messages = read_jsonl(self._path)
             cursor = self._read_cursor()
-            result = [json.loads(l) for l in lines]
-            for i, m in enumerate(result):
-                m["_read"] = i < cursor
-            return result
+            for i, message in enumerate(messages):
+                message["_read"] = i < cursor
+            return messages
 
     def has_mail(self) -> bool:
         with self._lock:
-            if not self._path.exists():
-                return False
-            total = len([l for l in self._path.read_text().splitlines() if l.strip()])
-            return total > self._read_cursor()
+            return len(read_jsonl(self._path)) > self._read_cursor()
 
 
 # ── Lifecycle ────────────────────────────────────────────
@@ -115,18 +106,22 @@ def _whoami() -> str:
     return getattr(_current, "name", LEAD_NAME)
 
 
+def _normalize_agent_name(name: str) -> str:
+    return AGENT_NAME_POLICY.normalize(name)
+
+
 def _resolve_agent(name: str) -> str:
-    name = name.strip().lower()
-    if name in ("default", "main", "orchestrator"):
-        return LEAD_NAME
-    return name
+    return _normalize_agent_name(name)
 
 
 # ── Protocol: send typed messages ────────────────────────
 
 def _send_envelope(to_agent: str, body: str, msg_type: str = TYPE_TASK, request_id: str = "") -> str:
     """Send a typed message. Generates request_id if needed."""
-    to_agent = _resolve_agent(to_agent)
+    try:
+        to_agent = _resolve_agent(to_agent)
+    except ValueError as e:
+        return f"Error: {e}"
     if not request_id and msg_type in (TYPE_SHUTDOWN, TYPE_PLAN):
         request_id = "req_" + uuid.uuid4().hex[:12]
     sender = _whoami()
@@ -194,6 +189,7 @@ def _try_auto_claim(agent_name: str) -> dict | None:
 
 def _remove_agent(name: str):
     """Internal: remove agent from registry and disk."""
+    name = _normalize_agent_name(name)
     if name in _agent_configs:
         del _agent_configs[name]
     if name in _agent_threads:
@@ -319,17 +315,27 @@ def _agent_loop(name: str, role: str, system_prompt: str):
         # ── Complete auto-claimed task ──────────────────
         if claimed_task_id:
             from task_system import run_complete_task
+            from config import REPO_DIR, set_workdir
             import worktree
-            worktree.merge(claimed_task_id)
-            run_complete_task(claimed_task_id)
-            print(f"\033[90m  [{name}] completed: {claimed_task_id}\033[0m")
+            merge_result = worktree.merge(claimed_task_id)
+            set_workdir(REPO_DIR)
+            if merge_result.startswith("CONFLICT") or merge_result.startswith("Error:"):
+                lead_mail.send(name, f"Auto-claimed task '{claimed_task_id}' could not be completed: {merge_result}")
+                print(f"\033[90m  [{name}] merge failed: {claimed_task_id}\033[0m")
+            else:
+                complete_result = run_complete_task(claimed_task_id)
+                lead_mail.send(name, f"Auto-claimed task '{claimed_task_id}' completed.\n{merge_result}\n{complete_result}")
+                print(f"\033[90m  [{name}] completed: {claimed_task_id}\033[0m")
 
 
 # ── Public API (tool handlers) ───────────────────────────
 
 def spawn_agent(name: str, role: str, system_prompt: str = "") -> str:
-    name = name.strip().lower().replace(" ", "-")
-    if not name or name == LEAD_NAME:
+    try:
+        name = _normalize_agent_name(name)
+    except ValueError as e:
+        return f"Error: {e}"
+    if name == LEAD_NAME:
         return f"Error: invalid agent name '{name}'"
     if name in _agent_threads:
         return f"Error: agent '{name}' already exists"
@@ -338,7 +344,7 @@ def spawn_agent(name: str, role: str, system_prompt: str = "") -> str:
     _agent_configs[name] = cfg
     cfg_dir = AGENTS_DIR / name
     cfg_dir.mkdir(parents=True, exist_ok=True)
-    (cfg_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2, ensure_ascii=False))
+    write_json_file(cfg_dir / "config.json", asdict(cfg))
 
     t = threading.Thread(target=_agent_loop, args=(name, role, system_prompt), daemon=True)
     t.start()
@@ -378,7 +384,10 @@ def reject_request(request_id: str, reason: str = "") -> str:
 
 
 def check_agent_mail(agent_name: str = "") -> str:
-    name = agent_name.strip().lower() if agent_name else _whoami()
+    try:
+        name = _resolve_agent(agent_name) if agent_name else _whoami()
+    except ValueError as e:
+        return f"Error: {e}"
     msgs = Mailbox(name).peek()
     if not msgs:
         return "(no mail)"
@@ -403,7 +412,10 @@ def list_agents() -> str:
 
 
 def kill_agent(name: str) -> str:
-    name = name.strip().lower()
+    try:
+        name = _normalize_agent_name(name)
+    except ValueError as e:
+        return f"Error: {e}"
     if name == LEAD_NAME:
         return "Error: cannot kill the lead agent"
     if name not in _agent_configs:

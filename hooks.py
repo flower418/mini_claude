@@ -7,6 +7,7 @@ HOOKS = {
     "PostToolUse": [],
     "Stop": [],
 }
+_INITIALIZED = False
 
 
 def register_hook(event: str, callback):
@@ -78,8 +79,12 @@ def summary_hook(messages: list):
 
 def init_hooks():
     """Register all built-in hooks. Called once at startup."""
+    global _INITIALIZED
+    if _INITIALIZED:
+        return
     register_hook("UserPromptSubmit", context_inject_hook)
     register_hook("PreToolUse", permission_hook)
     register_hook("PreToolUse", log_hook)
     register_hook("PostToolUse", large_output_hook)
     register_hook("Stop", summary_hook)
+    _INITIALIZED = True

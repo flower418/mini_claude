@@ -367,6 +367,8 @@ def safe_dispatch(handler, inputs: dict) -> str:
         return handler(**valid)
     except TypeError as e:
         return f"Error: bad arguments for {handler.__name__}: {e}"
+    except Exception as e:
+        return f"Error running {handler.__name__}: {e}"
 
 
 # ── Background task handlers ────────────────────────────

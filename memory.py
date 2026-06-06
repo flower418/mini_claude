@@ -5,6 +5,7 @@ import re
 import yaml
 
 from config import MEMORY_DIR, MEMORY_PRUNE_THRESHOLD, client, MODEL
+from state_store import atomic_write_text
 
 MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
 MEMORY_TYPES = ["user", "feedback", "project", "reference"]
@@ -21,8 +22,7 @@ TYPE_DESCRIPTIONS = {
 def init_memory():
     """Create .memory directory and index if they don't exist."""
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    if not MEMORY_INDEX.exists():
-        _rebuild_index()
+    _rebuild_index()
 
 
 # ── Entry helpers ───────────────────────────────────────
@@ -102,13 +102,12 @@ def _rebuild_index():
                 for e in group:
                     lines.append(f"- **{e['name']}**: {e.get('description', '')}")
     lines.append("")
-    MEMORY_INDEX.write_text("\n".join(lines))
+    atomic_write_text(MEMORY_INDEX, "\n".join(lines))
 
 
 def get_memory_index() -> str:
     """Return content of MEMORY.md for system prompt injection."""
-    if not MEMORY_INDEX.exists():
-        init_memory()
+    init_memory()
     return MEMORY_INDEX.read_text()
 
 
@@ -181,7 +180,7 @@ def write_memory(name: str, description: str, mem_type: str, content: str) -> st
         if len(new_lines & exist_lines) / max(len(new_lines), 1) > 0.6:
             return f"Content largely overlaps existing entry '{slug}' (skipped)"
 
-    entry_file.write_text(entry_md)
+    atomic_write_text(entry_file, entry_md)
     _rebuild_index()
     print(f"\033[90m[memory] Wrote entry: {slug}\033[0m")
     return f"Saved to .memory/{slug}/entry.md (type: {mem_type})"
@@ -279,7 +278,7 @@ def _parse_and_save(text: str):
             f"---\n\n"
             f"{body}\n"
         )
-        entry_file.write_text(entry_md)
+        atomic_write_text(entry_file, entry_md)
         print(f"\033[90m[memory] Created entry: {slug}\033[0m")
         updated = True
 
@@ -335,6 +334,6 @@ def _prune_entry(name: str):
             f"---\n\n"
             f"{pruned}\n"
         )
-        entry_file.write_text(new_md)
+        atomic_write_text(entry_file, new_md)
         print(f"\033[90m[memory] Pruned {name} ({len(body)} -> {len(pruned)} chars)\033[0m")
         _rebuild_index()
