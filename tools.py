@@ -216,6 +216,15 @@ SUB_TOOLS = [
           "accept": {"type": "boolean"},
           "reason": {"type": "string"}},
          ["request_id", "accept"]),
+    TOOL("claim_task", "Claim a pending task (sets status to in_progress). Fails if dependencies are not met.",
+         {"task_id": {"type": "string"},
+          "owner": {"type": "string"}},
+         ["task_id"]),
+    TOOL("complete_task", "Mark an in_progress task as completed. Notes any newly unblocked dependents.",
+         {"task_id": {"type": "string"}}),
+    TOOL("list_tasks", "List tasks with status icons and dependency arrows. Optionally filter by status.",
+         {"status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}},
+         []),
 ]
 
 
@@ -456,4 +465,6 @@ SUB_HANDLERS = {
     "edit_file": run_edit, "glob": run_glob,
     "send_to_agent": run_send_to_agent, "check_agent_mail": run_check_agent_mail,
     "request_plan": run_request_plan, "respond_request": run_respond_request,
+    "claim_task": run_claim_task, "complete_task": run_complete_task,
+    "list_tasks": run_list_tasks,
 }

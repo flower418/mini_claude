@@ -159,6 +159,34 @@ def _send_response(request_id: str, accept: bool, reason: str = "") -> str:
     return f"Sent [{label}] for request '{request_id}'"
 
 
+# ── Autonomous task claiming ─────────────────────────────
+
+def _try_auto_claim(agent_name: str) -> dict | None:
+    """Scan task system for a pending, unblocked, unclaimed task. Claim and return it."""
+    from task_system import _load_all_tasks, run_claim_task
+    tasks = _load_all_tasks()
+    for t in tasks:
+        if t["status"] != "pending":
+            continue
+        if t.get("owner"):
+            continue
+        # Check blockedBy
+        blocked = False
+        for bid in t.get("blockedBy", []):
+            dep = next((d for d in tasks if d["id"] == bid), None)
+            if dep and dep["status"] != "completed":
+                blocked = True
+                break
+        if blocked:
+            continue
+        # Claim it
+        result = run_claim_task(t["id"], agent_name)
+        if "Claimed" in result:
+            print(f"\033[90m  [{agent_name}] auto-claimed: {t['subject']}\033[0m")
+            return t
+    return None
+
+
 # ── Agent thread ─────────────────────────────────────────
 
 def _remove_agent(name: str):
@@ -190,9 +218,22 @@ def _agent_loop(name: str, role: str, system_prompt: str):
 
     while True:
         msgs = inbox.read_all()
+
+        # ── Idle: try auto-claim from task system ────
+        claimed_task_id = None
         if not msgs:
-            time.sleep(0.5)
-            continue
+            task = _try_auto_claim(name)
+            if task:
+                msgs = [{
+                    "type": TYPE_TASK, "request_id": "",
+                    "from": "task_system",
+                    "body": f"AUTO-CLAIMED TASK: {task['subject']}\n\n{task.get('description', '')}",
+                    "timestamp": datetime.now().isoformat(),
+                }]
+                claimed_task_id = task["id"]
+            else:
+                time.sleep(5)
+                continue
 
         # ── Classify incoming messages ────────────────
         shutdown_msgs = [m for m in msgs if m.get("type") == TYPE_SHUTDOWN]
@@ -271,6 +312,12 @@ def _agent_loop(name: str, role: str, system_prompt: str):
         if result and not shutdown_msgs:  # don't send result for shutdown-only interactions
             lead_mail.send(name, result)
             print(f"\033[90m  [{name}] → lead ({len(result)} chars)\033[0m")
+
+        # ── Complete auto-claimed task ──────────────────
+        if claimed_task_id:
+            from task_system import run_complete_task
+            run_complete_task(claimed_task_id)
+            print(f"\033[90m  [{name}] completed: {claimed_task_id}\033[0m")
 
 
 # ── Public API (tool handlers) ───────────────────────────
