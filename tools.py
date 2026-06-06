@@ -10,6 +10,7 @@ from skills import SUB_SYSTEM, load_skill
 from hooks import trigger_hooks
 from compact import run_compact
 from memory import search_memory, write_memory
+from task_system import run_create_task, run_claim_task, run_complete_task, run_list_tasks, run_get_task
 
 CURRENT_TODOS: list[dict] = []
 rounds_since_todo = 0
@@ -112,6 +113,22 @@ TOOLS = [
           "description": {"type": "string"},
           "mem_type": {"type": "string", "enum": ["user", "feedback", "project", "reference"]},
           "content": {"type": "string"}}),
+    TOOL("create_task", "Create a new task in the persistent task system. Tasks support dependency tracking across sessions.",
+         {"subject": {"type": "string"},
+          "description": {"type": "string"},
+          "blockedBy": {"type": "array", "items": {"type": "string"}}},
+         ["subject"]),
+    TOOL("claim_task", "Claim a pending task (sets status to in_progress). Fails if dependencies are not met.",
+         {"task_id": {"type": "string"},
+          "owner": {"type": "string"}},
+         ["task_id"]),
+    TOOL("complete_task", "Mark an in_progress task as completed. Notes any newly unblocked dependents.",
+         {"task_id": {"type": "string"}}),
+    TOOL("list_tasks", "List tasks with status icons and dependency arrows. Optionally filter by status.",
+         {"status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}},
+         []),
+    TOOL("get_task", "Get full details of a specific task including dependents.",
+         {"task_id": {"type": "string"}}),
 ]
 
 SUB_TOOLS = [
@@ -265,6 +282,9 @@ TOOL_HANDLERS = {
     "task": spawn_subagent, "load_skill": load_skill,
     "compact": run_compact, "memory_search": search_memory,
     "memory_write": write_memory,
+    "create_task": run_create_task, "claim_task": run_claim_task,
+    "complete_task": run_complete_task, "list_tasks": run_list_tasks,
+    "get_task": run_get_task,
 }
 
 SUB_HANDLERS = {

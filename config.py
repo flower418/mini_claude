@@ -12,6 +12,7 @@ TOOL_RESULTS_DIR = REPO_DIR / ".task_outputs" / "tool-results"
 TRANSCRIPT_DIR = REPO_DIR / ".transcripts"
 MEMORY_DIR = REPO_DIR / ".memory"
 MEMORY_PRUNE_THRESHOLD = 6000
+TASK_DIR = REPO_DIR / ".task"
 
 CONTEXT_LIMIT = 100000
 KEEP_RECENT = 5
