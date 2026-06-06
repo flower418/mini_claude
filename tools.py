@@ -14,6 +14,7 @@ from task_system import run_create_task, run_claim_task, run_complete_task, run_
 import background
 from background import should_background
 import scheduler
+from agent_team import spawn_agent, send_to_agent, check_lead_mail, list_agents
 
 CURRENT_TODOS: list[dict] = []
 rounds_since_todo = 0
@@ -153,6 +154,18 @@ TOOLS = [
          {}, []),
     TOOL("cancel_schedule", "Cancel and remove a scheduled task.",
          {"task_id": {"type": "string"}}),
+    TOOL("spawn_agent", "Spawn a new sub-agent in its own thread. It communicates via inbox. Use send_to_agent to give it tasks.",
+         {"name": {"type": "string"},
+          "role": {"type": "string"},
+          "system_prompt": {"type": "string"}},
+         ["name", "role"]),
+    TOOL("send_to_agent", "Send a message/task to a sub-agent. It will process asynchronously and reply to your inbox.",
+         {"agent_name": {"type": "string"},
+          "message": {"type": "string"}}),
+    TOOL("check_agent_mail", "Check your (lead) inbox for replies from sub-agents.",
+         {}, []),
+    TOOL("list_agents", "List all spawned sub-agents and their status.",
+         {}, []),
 ]
 
 SUB_TOOLS = [
@@ -345,6 +358,24 @@ def run_cancel_schedule(task_id: str) -> str:
     return scheduler.cancel_schedule(task_id)
 
 
+# ── Agent team handlers ──────────────────────────────────
+
+def run_spawn_agent(name: str, role: str, system_prompt: str = "") -> str:
+    return spawn_agent(name, role, system_prompt)
+
+
+def run_send_to_agent(agent_name: str, message: str) -> str:
+    return send_to_agent(agent_name, message)
+
+
+def run_check_agent_mail() -> str:
+    return check_lead_mail()
+
+
+def run_list_agents() -> str:
+    return list_agents()
+
+
 TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob, "todo_write": run_todo_write,
@@ -358,6 +389,8 @@ TOOL_HANDLERS = {
     "list_background": run_list_background,
     "schedule_task": run_schedule_task, "list_schedule": run_list_schedule,
     "cancel_schedule": run_cancel_schedule,
+    "spawn_agent": run_spawn_agent, "send_to_agent": run_send_to_agent,
+    "check_agent_mail": run_check_agent_mail, "list_agents": run_list_agents,
 }
 
 SUB_HANDLERS = {

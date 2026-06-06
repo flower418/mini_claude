@@ -22,6 +22,7 @@ from skills import get_system_prompt
 import tools
 import background
 import scheduler
+import agent_team
 from compact import preprocess_pipeline, estimate_size, compact_history, emergency_compact, CONTEXT_LIMIT
 from hooks import trigger_hooks, init_hooks
 
@@ -74,6 +75,14 @@ def agent_loop(messages: list):
                 messages.append({"role": "user",
                                  "content": f"<background-result task_id=\"{task_id}\">\n{result}\n</background-result>"})
                 print(f"\033[90m[bg] Injected result: {task_id} ({len(result)} chars)\033[0m")
+
+        # ── Collect agent team mail ─────────────────────
+        team_msgs = agent_team.Mailbox("lead").read_all()
+        if team_msgs:
+            for m in team_msgs:
+                messages.append({"role": "user",
+                                 "content": f"<agent-mail from=\"{m['from']}\">\n{m['body']}\n</agent-mail>"})
+                print(f"\033[90m[team] Mail from {m['from']} ({len(m['body'])} chars)\033[0m")
 
         # ── API call with 3-tier retry logic ─────────────
         max_tokens = 8000
