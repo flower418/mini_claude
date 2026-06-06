@@ -30,7 +30,7 @@ def _has_tool_result(msg) -> bool:
     return any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
 
 
-def snip_compact(messages, max_messages=50):
+def snip_compact(messages, max_messages=100):
     """Keep first 3 + last N messages, preserving tool_use/tool_result pairs."""
     if len(messages) <= max_messages:
         return messages

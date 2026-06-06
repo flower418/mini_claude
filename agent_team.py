@@ -151,8 +151,9 @@ def _whoami() -> str:
 def send_to_agent(agent_name: str, message: str) -> str:
     """Send a message to an agent's inbox. Sender is auto-detected from thread context."""
     agent_name = agent_name.strip().lower()
-    if agent_name not in _agent_threads and agent_name != LEAD_NAME:
-        return f"Error: agent '{agent_name}' not found."
+    # Map common aliases to "lead"
+    if agent_name in ("default", "lead", "main", "orchestrator"):
+        agent_name = LEAD_NAME
     sender = _whoami()
     Mailbox(agent_name).send(sender, message)
     print(f"\033[90m[team] {sender} → {agent_name}: {message[:60]}\033[0m")
@@ -181,3 +182,25 @@ def list_agents() -> str:
         icon = "\033[32m●\033[0m" if alive else "\033[31m✗\033[0m"
         lines.append(f"  {icon} {name}: {cfg.role}")
     return "\n".join(lines)
+
+
+def kill_agent(name: str) -> str:
+    """Remove an agent: clear inbox + config from disk, drop from registry."""
+    name = name.strip().lower()
+    if name == LEAD_NAME:
+        return "Error: cannot kill the lead agent"
+    if name not in _agent_configs:
+        return f"Error: agent '{name}' not found"
+
+    del _agent_configs[name]
+    if name in _agent_threads:
+        del _agent_threads[name]  # daemon thread will die with process
+
+    # Clean up disk
+    import shutil
+    agent_dir = AGENTS_DIR / name
+    if agent_dir.exists():
+        shutil.rmtree(agent_dir)
+
+    print(f"\033[90m[team] Killed: {name}\033[0m")
+    return f"Killed agent '{name}' and cleaned up .agents/{name}/"

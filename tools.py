@@ -14,7 +14,7 @@ from task_system import run_create_task, run_claim_task, run_complete_task, run_
 import background
 from background import should_background
 import scheduler
-from agent_team import spawn_agent, send_to_agent, check_agent_mail, list_agents
+from agent_team import spawn_agent, send_to_agent, check_agent_mail, list_agents, kill_agent
 
 CURRENT_TODOS: list[dict] = []
 rounds_since_todo = 0
@@ -166,6 +166,8 @@ TOOLS = [
          {"agent_name": {"type": "string"}}, []),
     TOOL("list_agents", "List all spawned sub-agents and their status.",
          {}, []),
+    TOOL("kill_agent", "Remove an agent: clean up its files and stop tracking it.",
+         {"name": {"type": "string"}}),
 ]
 
 SUB_TOOLS = [
@@ -380,6 +382,10 @@ def run_list_agents() -> str:
     return list_agents()
 
 
+def run_kill_agent(name: str) -> str:
+    return kill_agent(name)
+
+
 TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob, "todo_write": run_todo_write,
@@ -395,6 +401,7 @@ TOOL_HANDLERS = {
     "cancel_schedule": run_cancel_schedule,
     "spawn_agent": run_spawn_agent, "send_to_agent": run_send_to_agent,
     "check_agent_mail": run_check_agent_mail, "list_agents": run_list_agents,
+    "kill_agent": run_kill_agent,
 }
 
 SUB_HANDLERS = {
