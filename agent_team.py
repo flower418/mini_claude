@@ -1,9 +1,11 @@
 # ── Agent team: async sub-agents communicating via JSONL mailboxes ──
-# Lead spawns agents; each agent runs in its own thread.
-# Communication: append to agent's inbox.jsonl, read + truncate.
+# Protocol: typed messages (task/shutdown/plan/accept/reject) with request_id
+# Each request goes through request → confirm/reject cycle
 import json
+import shutil
 import threading
 import time
+import uuid
 from dataclasses import dataclass, asdict
 from datetime import datetime
 
@@ -12,7 +14,16 @@ from config import AGENTS_DIR, MODEL, client
 LEAD_NAME = "lead"
 _agent_threads: dict[str, threading.Thread] = {}
 _agent_configs: dict[str, "AgentConfig"] = {}
-_current = threading.local()  # thread-local: tracks which agent is executing
+_current = threading.local()
+_pending_requests: dict[str, dict] = {}
+_requests_lock = threading.Lock()
+
+# Message types
+TYPE_TASK     = "task"
+TYPE_SHUTDOWN = "shutdown"
+TYPE_PLAN     = "plan"
+TYPE_ACCEPT   = "accept"
+TYPE_REJECT   = "reject"
 
 
 @dataclass
@@ -25,7 +36,7 @@ class AgentConfig:
 # ── Mailbox ──────────────────────────────────────────────
 
 class Mailbox:
-    """Thread-safe JSONL inbox with cursor-based reads (no message loss)."""
+    """Thread-safe JSONL inbox with cursor-based reads."""
 
     def __init__(self, agent_name: str):
         self._path = AGENTS_DIR / agent_name / "inbox.jsonl"
@@ -42,40 +53,42 @@ class Mailbox:
     def _write_cursor(self, pos: int):
         self._cursor_path.write_text(str(pos))
 
-    def send(self, from_agent: str, body: str):
-        msg = json.dumps({
+    def send(self, from_agent: str, body: str, msg_type: str = TYPE_TASK, request_id: str = ""):
+        envelope = {
+            "type": msg_type,
+            "request_id": request_id,
             "from": from_agent,
             "body": body,
             "timestamp": datetime.now().isoformat(),
-        }, ensure_ascii=False)
+        }
+        line = json.dumps(envelope, ensure_ascii=False)
         with self._lock:
             with open(self._path, "a") as f:
-                f.write(msg + "\n")
+                f.write(line + "\n")
 
     def read_all(self) -> list[dict]:
-        """Read new messages since last read. Advances cursor. No truncation."""
+        """Read new messages since last cursor advance."""
         with self._lock:
             if not self._path.exists():
                 return []
-            lines = [line for line in self._path.read_text().splitlines() if line.strip()]
+            lines = [l for l in self._path.read_text().splitlines() if l.strip()]
             cursor = self._read_cursor()
             new_lines = lines[cursor:]
             if new_lines:
                 self._write_cursor(cursor + len(new_lines))
-            return [json.loads(line) for line in new_lines]
+            return [json.loads(l) for l in new_lines]
 
     def peek(self) -> list[dict]:
-        """Read all messages without advancing cursor. For check_agent_mail tool."""
+        """Read all messages without advancing cursor."""
         with self._lock:
             if not self._path.exists():
                 return []
-            lines = [line for line in self._path.read_text().splitlines() if line.strip()]
+            lines = [l for l in self._path.read_text().splitlines() if l.strip()]
             cursor = self._read_cursor()
-            all_msgs = [json.loads(line) for line in lines]
-            # Tag messages as read/unread
-            for i, m in enumerate(all_msgs):
+            result = [json.loads(l) for l in lines]
+            for i, m in enumerate(result):
                 m["_read"] = i < cursor
-            return all_msgs
+            return result
 
     def has_mail(self) -> bool:
         with self._lock:
@@ -88,8 +101,7 @@ class Mailbox:
 # ── Lifecycle ────────────────────────────────────────────
 
 def cleanup_stale():
-    """Remove .agents/ dirs from previous sessions (called once at startup)."""
-    import shutil
+    """Remove .agents/ dirs from previous sessions."""
     if AGENTS_DIR.exists():
         for d in AGENTS_DIR.iterdir():
             if d.is_dir():
@@ -97,17 +109,80 @@ def cleanup_stale():
         print(f"\033[90m[team] Cleaned stale agent dirs\033[0m")
 
 
+def _whoami() -> str:
+    return getattr(_current, "name", LEAD_NAME)
+
+
+def _resolve_agent(name: str) -> str:
+    name = name.strip().lower()
+    if name in ("default", "main", "orchestrator"):
+        return LEAD_NAME
+    return name
+
+
+# ── Protocol: send typed messages ────────────────────────
+
+def _send_envelope(to_agent: str, body: str, msg_type: str = TYPE_TASK, request_id: str = "") -> str:
+    """Send a typed message. Generates request_id if needed."""
+    to_agent = _resolve_agent(to_agent)
+    if not request_id and msg_type in (TYPE_SHUTDOWN, TYPE_PLAN):
+        request_id = "req_" + uuid.uuid4().hex[:12]
+    sender = _whoami()
+    Mailbox(to_agent).send(sender, body, msg_type, request_id)
+
+    if msg_type in (TYPE_SHUTDOWN, TYPE_PLAN):
+        with _requests_lock:
+            _pending_requests[request_id] = {
+                "type": msg_type, "from": sender, "to": to_agent,
+                "status": "pending", "timestamp": time.time(),
+            }
+    type_label = f"[{msg_type}]" if msg_type != TYPE_TASK else ""
+    print(f"\033[90m[team] {sender} → {to_agent}: {type_label} {body[:60]}\033[0m")
+    return f"Sent {type_label} to '{to_agent}'" + (f" (req: {request_id})" if request_id else "")
+
+
+def _send_response(request_id: str, accept: bool, reason: str = "") -> str:
+    """Respond to a pending request."""
+    with _requests_lock:
+        req = _pending_requests.get(request_id)
+    if not req:
+        return f"Error: request '{request_id}' not found"
+    resp_type = TYPE_ACCEPT if accept else TYPE_REJECT
+    target = req["from"]
+    body = reason or ("accepted" if accept else "rejected")
+    Mailbox(target).send(_whoami(), body, resp_type, request_id)
+    with _requests_lock:
+        _pending_requests[request_id]["status"] = "accepted" if accept else "rejected"
+    label = "accept" if accept else "reject"
+    print(f"\033[90m[team] {_whoami()} → {target}: [{label}] {request_id}\033[0m")
+    return f"Sent [{label}] for request '{request_id}'"
+
+
 # ── Agent thread ─────────────────────────────────────────
 
-def _agent_loop(name: str, role: str, system_prompt: str):
-    """Sub-agent thread: poll inbox → process with LLM+tools → send result to lead."""
-    _current.name = name  # thread-local so tools know who's calling
+def _remove_agent(name: str):
+    """Internal: remove agent from registry and disk."""
+    if name in _agent_configs:
+        del _agent_configs[name]
+    if name in _agent_threads:
+        del _agent_threads[name]
+    agent_dir = AGENTS_DIR / name
+    if agent_dir.exists():
+        shutil.rmtree(agent_dir)
 
-    # Lazy imports to avoid circular dependency with tools.py
+
+def _agent_loop(name: str, role: str, system_prompt: str):
+    """Sub-agent thread: idle loop → process tasks → handle protocol messages."""
+    _current.name = name
     from tools import SUB_TOOLS, SUB_HANDLERS, safe_dispatch
     from config import extract_text
 
-    sys_prompt = system_prompt or f"You are sub-agent '{name}'. Role: {role}. Work on the given task and return a concise result. Use tools if needed."
+    sys_prompt = system_prompt or (
+        f"You are sub-agent '{name}'. Role: {role}. "
+        f"Work on the given task and return a concise result. Use tools if needed. "
+        f"If you need approval for a complex plan, use request_plan. "
+        f"Use respond_request to accept/reject incoming requests."
+    )
 
     inbox = Mailbox(name)
     lead_mail = Mailbox(LEAD_NAME)
@@ -118,12 +193,39 @@ def _agent_loop(name: str, role: str, system_prompt: str):
             time.sleep(0.5)
             continue
 
-        # Combine all pending messages
-        combined = "\n\n".join(f"[{m['from']} @ {m['timestamp'][:19]}]: {m['body']}" for m in msgs)
+        # ── Handle protocol messages first ────────────
+        # Shutdown request → auto-accept + cleanup + exit
+        shutdown_req = None
+        for m in msgs:
+            if m.get("type") == TYPE_SHUTDOWN:
+                shutdown_req = m
+                break
+        if shutdown_req:
+            _send_response(shutdown_req["request_id"], accept=True, reason="shutting down")
+            _remove_agent(name)
+            print(f"\033[90m[team:{name}] Shutdown accepted, exiting\033[0m")
+            return
+
+        # Plan response (lead's decision on our plan)
+        plan_responses = [m for m in msgs if m.get("type") in (TYPE_ACCEPT, TYPE_REJECT)]
+        task_msgs = [m for m in msgs if m.get("type", TYPE_TASK) == TYPE_TASK]
+
+        # ── Build conversation from task messages ─────
+        if not task_msgs:
+            continue
+
+        # Include plan responses as context
+        context_parts = []
+        for pr in plan_responses:
+            decision = "APPROVED" if pr["type"] == TYPE_ACCEPT else "REJECTED"
+            context_parts.append(f"[SYSTEM: Plan {decision}] {pr['body']}")
+        for tm in task_msgs:
+            context_parts.append(f"[{tm['from']} @ {tm['timestamp'][:19]}]: {tm['body']}")
+        combined = "\n\n".join(context_parts)
         messages = [{"role": "user", "content": combined}]
 
-        # Tool-calling loop (max 8 turns)
-        for _ in range(8):
+        # ── Tool-calling loop (max 12 turns for plan+execute) ──
+        for _ in range(12):
             try:
                 response = client.messages.create(
                     model=MODEL,
@@ -150,7 +252,7 @@ def _agent_loop(name: str, role: str, system_prompt: str):
                     print(f"  \033[90m[team:{name}] {block.name}: {output[:100]}\033[0m")
             messages.append({"role": "user", "content": results})
 
-        # Extract result: scan backward for the last assistant message with text
+        # ── Extract and send result ───────────────────
         result = ""
         for msg in reversed(messages):
             if msg.get("role") == "assistant":
@@ -162,10 +264,9 @@ def _agent_loop(name: str, role: str, system_prompt: str):
             print(f"\033[90m[team:{name}] → lead ({len(result)} chars)\033[0m")
 
 
-# ── API for tools ────────────────────────────────────────
+# ── Public API (tool handlers) ───────────────────────────
 
 def spawn_agent(name: str, role: str, system_prompt: str = "") -> str:
-    """Spawn a new sub-agent in its own thread."""
     name = name.strip().lower().replace(" ", "-")
     if not name or name == LEAD_NAME:
         return f"Error: invalid agent name '{name}'"
@@ -174,8 +275,6 @@ def spawn_agent(name: str, role: str, system_prompt: str = "") -> str:
 
     cfg = AgentConfig(name=name, role=role, system_prompt=system_prompt)
     _agent_configs[name] = cfg
-
-    # Persist config
     cfg_dir = AGENTS_DIR / name
     cfg_dir.mkdir(parents=True, exist_ok=True)
     (cfg_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2, ensure_ascii=False))
@@ -187,25 +286,38 @@ def spawn_agent(name: str, role: str, system_prompt: str = "") -> str:
     return f"Spawned agent '{name}' ({role}). Use send_to_agent to give it work."
 
 
-def _whoami() -> str:
-    """Return the current agent's name (thread-local), defaulting to 'lead'."""
-    return getattr(_current, "name", LEAD_NAME)
-
-
 def send_to_agent(agent_name: str, message: str) -> str:
-    """Send a message to an agent's inbox. Sender is auto-detected from thread context."""
-    agent_name = agent_name.strip().lower()
-    # Map common aliases to "lead"
-    if agent_name in ("default", "lead", "main", "orchestrator"):
-        agent_name = LEAD_NAME
+    return _send_envelope(agent_name, message, TYPE_TASK)
+
+
+def request_shutdown(agent_name: str) -> str:
+    return _send_envelope(agent_name, "shutdown request", TYPE_SHUTDOWN)
+
+
+def request_plan(description: str) -> str:
+    """Sub-agent sends a plan to lead for approval."""
     sender = _whoami()
-    Mailbox(agent_name).send(sender, message)
-    print(f"\033[90m[team] {sender} → {agent_name}: {message[:60]}\033[0m")
-    return f"Sent to '{agent_name}'."
+    if sender == LEAD_NAME:
+        return "Error: only sub-agents can request plan approval"
+    return _send_envelope(LEAD_NAME, description, TYPE_PLAN)
+
+
+def respond_request(request_id: str, accept: bool, reason: str = "") -> str:
+    """Accept or reject an incoming request (used by sub-agents for shutdown)."""
+    return _send_response(request_id, accept, reason)
+
+
+def approve_request(request_id: str) -> str:
+    """Lead approves a pending plan request."""
+    return _send_response(request_id, accept=True)
+
+
+def reject_request(request_id: str, reason: str = "") -> str:
+    """Lead rejects a pending plan request."""
+    return _send_response(request_id, accept=False, reason=reason)
 
 
 def check_agent_mail(agent_name: str = "") -> str:
-    """Peek at an agent's inbox without consuming. Shows read/unread status."""
     name = agent_name.strip().lower() if agent_name else _whoami()
     msgs = Mailbox(name).peek()
     if not msgs:
@@ -213,12 +325,13 @@ def check_agent_mail(agent_name: str = "") -> str:
     lines = []
     for m in msgs:
         tag = "" if m.get("_read") else " \033[33m[new]\033[0m"
-        lines.append(f"[{m['from']}]{tag}: {m['body']}")
+        type_tag = f" [{m.get('type', '?')}]" if m.get("type", TYPE_TASK) != TYPE_TASK else ""
+        rid = f" ({m['request_id']})" if m.get("request_id") else ""
+        lines.append(f"[{m['from']}]{type_tag}{rid}{tag}: {m['body']}")
     return "\n\n".join(lines)
 
 
 def list_agents() -> str:
-    """List all spawned agents and their roles."""
     if not _agent_configs:
         return "(no agents spawned)"
     lines = []
@@ -230,22 +343,11 @@ def list_agents() -> str:
 
 
 def kill_agent(name: str) -> str:
-    """Remove an agent: clear inbox + config from disk, drop from registry."""
     name = name.strip().lower()
     if name == LEAD_NAME:
         return "Error: cannot kill the lead agent"
     if name not in _agent_configs:
         return f"Error: agent '{name}' not found"
-
-    del _agent_configs[name]
-    if name in _agent_threads:
-        del _agent_threads[name]  # daemon thread will die with process
-
-    # Clean up disk
-    import shutil
-    agent_dir = AGENTS_DIR / name
-    if agent_dir.exists():
-        shutil.rmtree(agent_dir)
-
+    _remove_agent(name)
     print(f"\033[90m[team] Killed: {name}\033[0m")
     return f"Killed agent '{name}' and cleaned up .agents/{name}/"

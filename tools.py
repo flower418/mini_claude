@@ -14,7 +14,10 @@ from task_system import run_create_task, run_claim_task, run_complete_task, run_
 import background
 from background import should_background
 import scheduler
-from agent_team import spawn_agent, send_to_agent, check_agent_mail, list_agents, kill_agent
+from agent_team import (
+    spawn_agent, send_to_agent, check_agent_mail, list_agents, kill_agent,
+    request_shutdown, request_plan, respond_request, approve_request, reject_request,
+)
 
 CURRENT_TODOS: list[dict] = []
 rounds_since_todo = 0
@@ -168,6 +171,21 @@ TOOLS = [
          {}, []),
     TOOL("kill_agent", "Remove an agent: clean up its files and stop tracking it.",
          {"name": {"type": "string"}}),
+    TOOL("request_shutdown", "Send a shutdown request to a sub-agent. It will auto-accept and clean up.",
+         {"agent_name": {"type": "string"}}),
+    TOOL("approve_request", "Approve a pending plan request from a sub-agent.",
+         {"request_id": {"type": "string"}}),
+    TOOL("reject_request", "Reject a pending plan request from a sub-agent.",
+         {"request_id": {"type": "string"},
+          "reason": {"type": "string"}},
+         ["request_id"]),
+    TOOL("request_plan", "(Sub-agent only) Send a plan to lead for approval before executing.",
+         {"description": {"type": "string"}}),
+    TOOL("respond_request", "(Sub-agent only) Accept or reject an incoming request (e.g. shutdown).",
+         {"request_id": {"type": "string"},
+          "accept": {"type": "boolean"},
+          "reason": {"type": "string"}},
+         ["request_id", "accept"]),
 ]
 
 SUB_TOOLS = [
@@ -191,6 +209,13 @@ SUB_TOOLS = [
          {"agent_name": {"type": "string"}, "message": {"type": "string"}}),
     TOOL("check_agent_mail", "Check your own inbox for new messages.",
          {}, []),
+    TOOL("request_plan", "Send a plan to lead for approval before doing complex work.",
+         {"description": {"type": "string"}}),
+    TOOL("respond_request", "Accept or reject an incoming request (e.g. shutdown from lead).",
+         {"request_id": {"type": "string"},
+          "accept": {"type": "boolean"},
+          "reason": {"type": "string"}},
+         ["request_id", "accept"]),
 ]
 
 
@@ -386,6 +411,26 @@ def run_kill_agent(name: str) -> str:
     return kill_agent(name)
 
 
+def run_request_shutdown(agent_name: str) -> str:
+    return request_shutdown(agent_name)
+
+
+def run_approve_request(request_id: str) -> str:
+    return approve_request(request_id)
+
+
+def run_reject_request(request_id: str, reason: str = "") -> str:
+    return reject_request(request_id, reason)
+
+
+def run_request_plan(description: str) -> str:
+    return request_plan(description)
+
+
+def run_respond_request(request_id: str, accept: bool, reason: str = "") -> str:
+    return respond_request(request_id, accept, reason)
+
+
 TOOL_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob, "todo_write": run_todo_write,
@@ -401,11 +446,14 @@ TOOL_HANDLERS = {
     "cancel_schedule": run_cancel_schedule,
     "spawn_agent": run_spawn_agent, "send_to_agent": run_send_to_agent,
     "check_agent_mail": run_check_agent_mail, "list_agents": run_list_agents,
-    "kill_agent": run_kill_agent,
+    "kill_agent": run_kill_agent, "request_shutdown": run_request_shutdown,
+    "approve_request": run_approve_request, "reject_request": run_reject_request,
+    "request_plan": run_request_plan, "respond_request": run_respond_request,
 }
 
 SUB_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob,
     "send_to_agent": run_send_to_agent, "check_agent_mail": run_check_agent_mail,
+    "request_plan": run_request_plan, "respond_request": run_respond_request,
 }
